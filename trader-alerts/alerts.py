@@ -30,6 +30,19 @@ Quotes (free, delayed, for alerts only, never for placing orders):
           CSV; it answered 404 on 2026-10-13, kept for when it is back)
   --offline DIR reads DIR/<source>-<TICKER>.json|csv instead of the network.
 
+B3 (Brazil): tickers like PETR4, BOVA11 or AAPL34 are quoted from brapi.dev
+first (API v2, https://brapi.dev/api/v2/stocks/quote?symbols=PETR4, one
+ticker per request) and from Yahoo as PETR4.SA when brapi fails; both are
+saved as PETR4. brapi wants an API key in the BRAPI_TOKEN environment
+variable, sent as "Authorization: Bearer" (never in the URL, never in the
+chat). Without a key only its test tickers answer: PETR4, VALE3, ITUB4,
+MGLU3, MXRF11 and HGLG11. The free plan is about 15,000 requests a month,
+one at a time, quotes about 30 minutes delayed. `clock --market br` and opening-bell rules with
+"market": "br" use the B3 calendar in b3.py (2026 published by B3, 2027
+provisional) and the cash-market hours, 10:00 to 16:55 Brasília while the US
+is on daylight time and 10:00 to 17:55 otherwise. `--now` without an offset
+is Brasília time when --market br.
+
 NYSE calendar: the 2026 and 2027 holidays and 1:00 p.m. early closes as
 published at https://www.nyse.com/markets/hours-calendars (read 2026-10-13).
 Outside those years the clock says the holiday list is unknown.
@@ -45,6 +58,9 @@ import sys
 import time
 import urllib.error
 import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import b3  # noqa: E402  (calendário, horário e tickers da B3)
 
 UA = "Mozilla/5.0 (compatible; trader-skill/1.0; +https://github.com/Jakeschincariol/trader-skill)"
 PAUSE = 0.5  # seconds between requests: be polite to free endpoints
@@ -117,8 +133,8 @@ def eastern_to_utc(local):
     return local + datetime.timedelta(hours=5)
 
 
-def parse_now(text):
-    """ISO time -> naive UTC. A time without an offset is taken as New York time."""
+def parse_now(text, market="us"):
+    """ISO time -> naive UTC. A time without an offset is New York time (Brasília with market br)."""
     if not text:
         return datetime.datetime.now(datetime.timezone.utc).replace(microsecond=0, tzinfo=None)
     t = text.strip().replace("Z", "+00:00")
@@ -127,6 +143,8 @@ def parse_now(text):
     except ValueError:
         raise AlertError("--now wants an ISO time like 2026-10-13T09:31 (New York) or ...Z (UTC)")
     if dt.tzinfo is None:
+        if market == "br":
+            return dt + datetime.timedelta(hours=3)
         return eastern_to_utc(dt)
     return (dt - dt.utcoffset()).replace(tzinfo=None)
 
@@ -149,11 +167,43 @@ def session(d):
     return OPEN, (EARLY if d.isoformat() in NYSE_EARLY_CLOSE else CLOSE)
 
 
+def b3_status(now_utc):
+    """Same shape as market_status, for the B3 (times in Brasília)."""
+    now = now_utc.replace(tzinfo=datetime.timezone.utc).astimezone(b3.BRT)
+    d = now.date()
+    st = {"market": "br", "now_local": now.strftime("%Y-%m-%d %H:%M"), "now_new_york": now.strftime("%Y-%m-%d %H:%M"),
+          "tz": "Brasília", "date": d.isoformat(), "weekday": now.strftime("%A"),
+          "calendar_known": d.year in b3.HOLIDAYS, "provisional": d.year in b3.PROVISIONAL_YEARS,
+          "open": False, "reason": "", "early_close": None}
+    try:
+        s = b3.session(d)
+    except KeyError:
+        st["reason"] = "B3 calendar for %d unknown" % d.year
+        return st
+    if s is None:
+        st["reason"] = "weekend" if d.weekday() >= 5 else "B3 holiday: " + (b3.holiday(d) or "")
+    else:
+        st["opens"], st["closes"] = s["open"].strftime("%H:%M"), s["close"].strftime("%H:%M")
+        if s["note"]:
+            st["note"] = s["note"]
+        if s["open"] <= now < s["close"]:
+            st["open"], st["reason"] = True, "regular session"
+        elif now < s["open"]:
+            st["reason"] = "before the open"
+        else:
+            st["reason"] = "after the close"
+    c = b3.clock(now)
+    if c.get("next"):
+        st["next_open"] = c["next"]["open"].strftime("%Y-%m-%d %H:%M")
+    return st
+
+
 def market_status(now_utc):
     local = to_eastern(now_utc)
     d = local.date()
     ok, reason = trading_day(d)
-    st = {"now_new_york": local.strftime("%Y-%m-%d %H:%M"), "date": d.isoformat(),
+    st = {"market": "us", "now_new_york": local.strftime("%Y-%m-%d %H:%M"), "now_local": local.strftime("%Y-%m-%d %H:%M"),
+          "tz": "New York", "date": d.isoformat(),
           "weekday": local.strftime("%A"), "calendar_known": d.year in CALENDAR_YEARS,
           "open": False, "reason": reason, "early_close": NYSE_EARLY_CLOSE.get(d.isoformat())}
     s = session(d)
@@ -184,6 +234,8 @@ def stooq_url(sym):
 
 
 def yahoo_url(sym):
+    if b3.is_b3(sym):
+        return "https://query1.finance.yahoo.com/v8/finance/chart/%s?range=1d&interval=1d" % b3.yahoo_symbol(sym)
     return "https://query1.finance.yahoo.com/v8/finance/chart/%s?range=1d&interval=1d" % (
         sym.upper().replace(".", "-"))
 
@@ -233,26 +285,98 @@ def parse_yahoo(text, sym):
             "currency": m.get("currency"), "source": "yahoo"}
 
 
-def fetch(url, timeout=20):
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "*/*"})
+BRAPI_FREE = {"PETR4", "VALE3", "ITUB4", "MGLU3", "MXRF11", "HGLG11"}
+
+
+def brapi_url(sym):
+    return "https://brapi.dev/api/v2/stocks/quote?symbols=%s" % b3.base(sym)
+
+
+def parse_brapi(text, sym):
+    """brapi v2: {"results": [{"requestedSymbol", "symbol", "changed", "data": {...}}]}."""
+    try:
+        data = json.loads(text)
+    except ValueError:
+        raise AlertError("brapi returned something unexpected for %s" % sym)
+    res = data.get("results") or []
+    if not res or not isinstance(res[0], dict) or not res[0].get("data"):
+        msg = data.get("message") or data.get("error") or "no data"
+        raise AlertError("brapi has no data for %s: %s" % (sym, msg))
+    r = res[0]
+    d = r["data"]
+    price = d.get("regularMarketPrice")
+    if price is None:
+        raise AlertError("brapi has no price for %s" % sym)
+    prev = d.get("regularMarketPreviousClose")
+    if prev is None and d.get("regularMarketChange") is not None:
+        prev = round(float(price) - float(d["regularMarketChange"]), 4)
+    q = {"symbol": b3.base(sym), "price": float(price), "open": d.get("regularMarketOpen"),
+         "high": d.get("regularMarketDayHigh"), "low": d.get("regularMarketDayLow"),
+         "prev_close": prev, "time": d.get("regularMarketTime") or "",
+         "currency": d.get("currency") or "BRL", "name": d.get("shortName") or d.get("longName") or "",
+         "source": "brapi"}
+    if r.get("changed"):
+        q["renamed_to"] = r.get("symbol")
+    return q
+
+
+def fetch(url, timeout=20, headers=None):
+    hdrs = {"User-Agent": UA, "Accept": "*/*"}
+    hdrs.update(headers or {})
+    req = urllib.request.Request(url, headers=hdrs)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.read().decode("utf-8", "replace")
     except urllib.error.HTTPError as e:
-        raise AlertError("%s answered HTTP %d" % (url.split("?")[0], e.code))
+        hint = {401: " (missing or invalid key: set BRAPI_TOKEN)", 403: " (your plan does not include this)",
+                429: " (quota or concurrency limit reached)"}.get(e.code, "") if "brapi.dev" in url else ""
+        raise AlertError("%s answered HTTP %d%s" % (url.split("?")[0], e.code, hint))
     except urllib.error.URLError as e:
         raise AlertError("could not reach %s: %s" % (url.split("/")[2], e.reason))
 
 
+def _brapi_quote(sym, offline=None):
+    if offline:
+        path = os.path.join(offline, "brapi-%s.json" % b3.base(sym))
+        if not os.path.exists(path):
+            raise AlertError("no offline quote file %s" % path)
+        with open(path, encoding="utf-8") as fh:
+            return parse_brapi(fh.read(), sym)
+    token = os.environ.get("BRAPI_TOKEN", "").strip()
+    if not token and b3.base(sym) not in BRAPI_FREE:
+        raise AlertError("brapi needs a key for %s: export BRAPI_TOKEN=... (free plan at brapi.dev); "
+                         "without one only %s answer" % (sym, ", ".join(sorted(BRAPI_FREE))))
+    headers = {"Authorization": "Bearer " + token} if token else {}
+    return parse_brapi(fetch(brapi_url(sym), headers=headers), sym)
+
+
 def get_quotes(symbols, source="yahoo", offline=None, pause=PAUSE):
-    """{SYM: quote} and [errors]. One request per ticker, with a pause between."""
+    """{SYM: quote} and [errors]. One request per ticker, with a pause between.
+
+    B3 tickers: brapi first, then Yahoo (PETR4.SA) if brapi fails, unless the
+    source was chosen explicitly as yahoo or brapi."""
     quotes, errors = {}, []
     for i, sym in enumerate(symbols):
-        sym = sym.upper()
+        sym = b3.clean(sym)
+        src = source
+        if b3.is_b3(sym) and src in ("auto", "stooq", "brapi"):
+            if i and pause and not offline:
+                time.sleep(pause)
+            try:
+                quotes[sym] = _brapi_quote(sym, offline)
+                continue
+            except AlertError as e:
+                if src == "brapi":
+                    errors.append(str(e))
+                    continue
+                errors.append(str(e) + "; trying Yahoo")
+            src = "yahoo"
+        elif src in ("auto", "brapi"):
+            src = "yahoo"  # brapi covers the B3; US tickers go to Yahoo
         try:
             if offline:
-                ext = "csv" if source == "stooq" else "json"
-                path = os.path.join(offline, "%s-%s.%s" % (source, sym, ext))
+                ext = "csv" if src == "stooq" else "json"
+                path = os.path.join(offline, "%s-%s.%s" % (src, sym, ext))
                 if not os.path.exists(path):
                     raise AlertError("no offline quote file %s" % path)
                 with open(path, encoding="utf-8") as fh:
@@ -260,8 +384,10 @@ def get_quotes(symbols, source="yahoo", offline=None, pause=PAUSE):
             else:
                 if i and pause:
                     time.sleep(pause)
-                text = fetch(stooq_url(sym) if source == "stooq" else yahoo_url(sym))
-            quotes[sym] = parse_stooq(text, sym) if source == "stooq" else parse_yahoo(text, sym)
+                text = fetch(stooq_url(sym) if src == "stooq" else yahoo_url(sym))
+            q = parse_stooq(text, sym) if src == "stooq" else parse_yahoo(text, sym)
+            q["symbol"] = sym  # PETR4, not PETR4.SA
+            quotes[sym] = q
         except AlertError as e:
             errors.append(str(e))
     return quotes, errors
@@ -292,7 +418,7 @@ def _write(path, doc):
     if d:
         os.makedirs(d, exist_ok=True)
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump(doc, fh, indent=2)
+        json.dump(doc, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
 
 
@@ -334,11 +460,20 @@ def evaluate(rules, quotes, status, state, now_utc):
         rid = r.get("id") or "%s-%s" % (r.get("symbol", "market"), r["type"])
         typ = {"stop": "below", "target": "above"}.get(r["type"], r["type"])
         if typ == "opening_bell":
-            if status["open"] and rung.get(rid, "")[:10] != today:
-                rings.append({"id": rid, "symbol": "", "message": "Opening bell: the NYSE is open (%s New York)%s."
-                              % (status["now_new_york"], (", early close at 1:00 p.m. today, "
-                                                          + status["early_close"]) if status.get("early_close") else "")})
-                rung[rid] = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
+            mk = r.get("market", "us")
+            st = (status.get("markets") or {}).get(mk, status)
+            if mk == "br" and st.get("market") != "br":
+                st = b3_status(now_utc)
+            if st["open"] and rung.get(rid, "")[:10] != st["date"]:
+                if mk == "br":
+                    msg = "Abertura: a B3 está aberta (%s, Brasília), pregão até %s." % (
+                        st["now_local"], st.get("closes", "?"))
+                else:
+                    msg = "Opening bell: the NYSE is open (%s New York)%s." % (
+                        st["now_new_york"], (", early close at 1:00 p.m. today, " + st["early_close"])
+                        if st.get("early_close") else "")
+                rings.append({"id": rid, "symbol": "", "message": msg})
+                rung[rid] = st["date"] + now_utc.strftime("T%H:%M:%SZ")
             continue
         sym = r["symbol"].upper()
         q = quotes.get(sym)
@@ -350,9 +485,10 @@ def evaluate(rules, quotes, status, state, now_utc):
             if hit and rid not in rung:
                 word = "at or above" if typ == "above" else "at or below"
                 label = {"stop": "stop", "target": "target"}.get(r["type"], typ)
-                rings.append({"id": rid, "symbol": sym, "message": "%s %s $%.2f is %s your %s $%s%s."
-                              % (sym, "is" if status["open"] else "last", p, word, label, _n(r["price"]),
-                                 (" (" + r["note"] + ")") if r.get("note") else "")})
+                mk = b3.market_of(sym)
+                rings.append({"id": rid, "symbol": sym, "message": "%s %s %s is %s your %s %s%s."
+                              % (sym, "is" if status["open"] else "last", b3.money(p, mk, True), word, label,
+                                 b3.money(r["price"], mk), (" (" + r["note"] + ")") if r.get("note") else "")})
                 rung[rid] = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
             elif not hit and rid in rung and r.get("rearm"):
                 del rung[rid]
@@ -364,8 +500,9 @@ def evaluate(rules, quotes, status, state, now_utc):
             want = r.get("direction")
             hit = abs(move) >= r["pct"] and (not want or (want == "up") == (move > 0))
             if hit and rung.get(rid, "")[:10] != today:
-                rings.append({"id": rid, "symbol": sym, "message": "%s moved %+.2f%% to $%.2f (from $%.2f)."
-                              % (sym, move, p, float(ref))})
+                mk = b3.market_of(sym)
+                rings.append({"id": rid, "symbol": sym, "message": "%s moved %+.2f%% to %s (from %s)."
+                              % (sym, move, b3.money(p, mk, True), b3.money(float(ref), mk, True))})
                 rung[rid] = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     state["last_check"] = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     return rings, state
@@ -397,7 +534,35 @@ def _dedupe(items):
     return out
 
 
+def config_market(a):
+    m = getattr(a, "market", None)
+    if m:
+        return m
+    cfg = _read(getattr(a, "config", "trader/config.json"), {})
+    return str(cfg.get("market") or "us").lower()
+
+
 def cmd_clock(a):
+    mk = config_market(a)
+    if mk == "br":
+        st = b3_status(parse_now(a.now, "br"))
+        if a.json:
+            print(json.dumps(st, indent=2))
+            return 0 if st["open"] else 1
+        print("Brasília %s: B3 %s, %s." % (st["now_local"], "ABERTA" if st["open"] else "fechada", {
+            "regular session": "pregão regular", "before the open": "antes da abertura",
+            "after the close": "depois do fechamento", "weekend": "fim de semana"}.get(st["reason"], st["reason"])))
+        if st.get("opens"):
+            print("Pregão de hoje (mercado à vista): %s às %s%s." % (st["opens"], st["closes"],
+                  (" (%s)" % st["note"]) if st.get("note") else ""))
+        if not st["open"] and st.get("next_open"):
+            print("Próxima abertura: %s (Brasília)." % st["next_open"])
+        if st.get("provisional"):
+            print("Calendário de %s provisório: a B3 ainda não publicou. Confira em b3.com.br." % st["date"][:4])
+        if not st["calendar_known"]:
+            print("Calendário da B3 só cobre %s: confira em b3.com.br." % " e ".join(map(str, sorted(b3.HOLIDAYS))))
+        print("Horário segue o horário de verão dos EUA (16h55 ou 17h55 de fechamento); a B3 anuncia por ofício circular.")
+        return 0 if st["open"] else 1
     st = market_status(parse_now(a.now))
     if a.json:
         print(json.dumps(st, indent=2))
@@ -415,7 +580,7 @@ def cmd_clock(a):
 
 
 def cmd_quote(a):
-    syms = _dedupe([s.upper() for s in a.symbols] + (holdings(a) if a.holdings else []))
+    syms = _dedupe([b3.clean(s) for s in a.symbols] + (holdings(a) if a.holdings else []))
     if not syms:
         raise AlertError("which tickers? alerts.py quote AAPL KO, or --holdings")
     now = parse_now(a.now)
@@ -431,7 +596,11 @@ def cmd_quote(a):
                 chg = ""
                 if q.get("prev_close"):
                     chg = " (%+.2f%% vs prev close $%.2f)" % (100.0 * (q["price"] / q["prev_close"] - 1), q["prev_close"])
-                print("%-6s $%.2f%s  %s  [%s]" % (s, q["price"], chg, q.get("time", ""), q["source"]))
+                mk = b3.market_of(s)
+                if q.get("prev_close"):
+                    chg = " (%+.2f%% vs prev close %s)" % (100.0 * (q["price"] / q["prev_close"] - 1),
+                                                          b3.money(q["prev_close"], mk, True))
+                print("%-6s %s%s  %s  [%s]" % (s, b3.money(q["price"], mk, True), chg, q.get("time", ""), q["source"]))
         for e in errors:
             print("error: " + e)
         if a.write and quotes:
@@ -445,9 +614,11 @@ def cmd_check(a):
     if not doc or not doc.get("rules"):
         raise AlertError("no rules in %s: add one with alerts.py add --symbol AAPL --above 350" % a.rules)
     rules = doc["rules"]
-    now = parse_now(a.now)
-    status = market_status(now)
-    syms = _dedupe([str(r.get("symbol", "")).upper() for r in rules if r.get("type") != "opening_bell"])
+    mk = config_market(a)
+    now = parse_now(a.now, mk)
+    status = b3_status(now) if mk == "br" else market_status(now)
+    status["markets"] = {"us": market_status(now), "br": b3_status(now)}
+    syms = _dedupe([b3.clean(r.get("symbol", "")) for r in rules if r.get("type") != "opening_bell"])
     quotes, errors = (get_quotes(syms, a.source, a.offline) if syms else ({}, []))
     state = _read(a.state, {})
     rings, state = evaluate(rules, quotes, status, state, now)
@@ -456,11 +627,12 @@ def cmd_check(a):
         if quotes:
             write_prices(a.prices_out, quotes, now, a.source)
     if a.json:
+        status.pop("markets", None)
         print(json.dumps({"market": status, "rings": rings, "errors": errors,
                           "quotes": {s: q["price"] for s, q in quotes.items()}}, indent=2))
     else:
-        print("NYSE %s (%s New York, %s)." % ("OPEN" if status["open"] else "closed", status["now_new_york"],
-                                              status["reason"]))
+        print("%s %s (%s %s, %s)." % ("B3" if mk == "br" else "NYSE", "OPEN" if status["open"] else "closed",
+                                       status["now_local"], status["tz"], status["reason"]))
         for r in rings:
             print("ALERT " + r["message"])
         if not rings:
@@ -477,11 +649,14 @@ def cmd_add(a):
     doc = _read(a.rules, {"rules": []})
     doc.setdefault("rules", [])
     if a.opening_bell:
-        rule = {"id": a.id or "opening-bell", "type": "opening_bell"}
+        mk = config_market(a)
+        rule = {"id": a.id or ("opening-bell" if mk == "us" else "abertura-b3"), "type": "opening_bell"}
+        if mk == "br":
+            rule["market"] = "br"
     else:
         if not a.symbol:
             raise AlertError("--symbol is required (or --opening-bell)")
-        sym = a.symbol.upper()
+        sym = b3.clean(a.symbol)
         if a.above is not None:
             rule = {"type": "above", "price": a.above}
         elif a.below is not None:
@@ -539,14 +714,20 @@ def main(argv=None):
     sub = ap.add_subparsers(dest="cmd")
 
     def net(p):
-        p.add_argument("--source", default="yahoo", choices=["yahoo", "stooq"])
+        p.add_argument("--source", default="auto", choices=["auto", "brapi", "yahoo", "stooq"],
+                       help="auto: brapi then Yahoo for B3 tickers, Yahoo for US tickers")
         p.add_argument("--offline", metavar="DIR", help="read <source>-<TICKER>.json|csv files, no network")
         p.add_argument("--now", help="pretend it is this time (ISO; no offset = New York time)")
         p.add_argument("--json", action="store_true")
 
-    p = sub.add_parser("clock", help="is the NYSE open?")
+    def mkt(p):
+        p.add_argument("--market", choices=["us", "br"], help="NYSE (us) or B3 (br); default from trader/config.json")
+        p.add_argument("--config", default="trader/config.json")
+
+    p = sub.add_parser("clock", help="is the NYSE (or the B3) open?")
     p.add_argument("--now")
     p.add_argument("--json", action="store_true")
+    mkt(p)
     p = sub.add_parser("quote", help="latest delayed quotes")
     net(p)
     p.add_argument("symbols", nargs="*")
@@ -561,6 +742,7 @@ def main(argv=None):
     p.add_argument("--state", default="trader/state/alerts.json")
     p.add_argument("--prices-out", default="trader/prices.json")
     p.add_argument("--no-write", action="store_true")
+    mkt(p)
     p = sub.add_parser("add", help="add a rule")
     p.add_argument("--rules", default="trader/alerts.json")
     p.add_argument("--symbol")
@@ -574,6 +756,7 @@ def main(argv=None):
     p.add_argument("--rearm", action="store_true")
     p.add_argument("--note")
     p.add_argument("--id")
+    mkt(p)
     p = sub.add_parser("list", help="list the rules")
     p.add_argument("--rules", default="trader/alerts.json")
     p.add_argument("--state", default="trader/state/alerts.json")

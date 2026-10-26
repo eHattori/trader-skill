@@ -27,6 +27,12 @@ The rules:
   untracked     holdings not in the targets are left alone and listed, unless
                 --sell-untracked
 
+B3 ("market": "br" in the config, or all tickers from the B3): whole shares,
+reais, limit orders (price -/+ "limit_buffer_pct", default 0.5%) and each
+order split into a standard-lot leg and a fractional leg (PETR4 + PETR4F).
+Stock sales over R$ 20.000 in a month lose the swing-trade exemption: the
+report says so before you sell.
+
 Exit code 0 when there are trades to propose, 1 when nothing is outside the band.
 """
 
@@ -36,6 +42,9 @@ import json
 import math
 import os
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import b3  # noqa: E402
 
 DEFAULTS = {"cash_buffer_pct": 10, "max_position_pct": 25, "max_order_usd": 2000, "min_order_usd": 5,
             "fractional": True, "blocked": [], "rebalance_band_pct": 5, "paper": True}
@@ -58,7 +67,12 @@ def read_json(path, what, required=True):
         raise RebalanceError("%s is not valid JSON: %s" % (path, e))
 
 
+_MKT = ["us"]
+
+
 def money(x):
+    if _MKT[0] == "br":
+        return b3.money(x, "br")
     x = float(x)
     sign = "-" if x < -0.004 else ""
     s = "{:,.2f}".format(abs(x))
@@ -125,6 +139,11 @@ def plan(portfolio, prices, weights, cfg, band=None, sell_untracked=False):
     """Pure function: the drift table and the proposed trades."""
     c = dict(DEFAULTS)
     c.update(cfg or {})
+    br = _MKT[0] == "br"
+    if br:
+        c["fractional"] = False
+        c["min_order_usd"] = c.get("min_order", c.get("min_order_brl", 50))
+        c["max_order_usd"] = c.get("max_order", c.get("max_order_brl", 0)) or 0
     band = float(c["rebalance_band_pct"] if band is None else band)
     cash = float((portfolio or {}).get("cash", 0) or 0)
     held = holdings_of(portfolio)
@@ -226,9 +245,40 @@ def plan(portfolio, prices, weights, cfg, band=None, sell_untracked=False):
         orders.append(o)
 
     spent = sum(o["_usd"] for o in orders if o["side"] == "buy")
+    if br:
+        orders = to_b3(orders, prices, c)
+        cash_after = cash + sum(o["_usd"] for o in orders if o["side"] == "sell")
+        spent = sum(o["_usd"] for o in orders if o["side"] == "buy")
+        sold = sum(o["_usd"] for o in orders if o["side"] == "sell"
+                   and b3.asset_type(o["underlying"], c.get("asset_types"))[0] in ("acao", "unit"))
+        if sold > 20000:
+            notes.append("as vendas de ações somam %s: acima de R$ 20.000 no mês, o lucro paga 15%% de IR "
+                         "(confira com ir_br.py antes)" % money(sold))
     return {"account_value": round(total, 2), "cash": round(cash, 2), "cash_buffer": round(buf, 2),
             "cap": round(cap, 2), "band": band, "rows": rows, "orders": orders, "notes": notes,
             "cash_after": round(cash_after - spent, 2)}
+
+
+def to_b3(orders, prices, c):
+    """Lote padrão + fracionário, ordem limitada com folga, validade do dia."""
+    buf = float(c.get("limit_buffer_pct", 0.5) or 0) / 100.0
+    out = []
+    for o in orders:
+        t = b3.base(o["symbol"])
+        qty = int(float(o["qty"]))
+        p = prices[t]
+        limit = b3.tick(p * (1 + buf) if o["side"] == "buy" else p * (1 - buf))
+        lot = b3.round_lot(t, c.get("asset_types"), c.get("round_lots"))
+        kind, _ = b3.asset_type(t, c.get("asset_types"))
+        lote, frac = b3.split_lot(qty, lot)
+        for sym, q, lm in ((t, lote, "padrao"), (b3.fractional(t), frac, "fracionario")):
+            if q <= 0:
+                continue
+            out.append({"symbol": sym, "side": o["side"], "qty": str(q), "type": "limit",
+                        "limit_price": "%.2f" % limit, "time_in_force": "day", "market": "br",
+                        "lot_market": lm, "underlying": t, "asset_type": kind, "why": o["why"],
+                        "_usd": round(q * limit, 2)})
+    return out
 
 
 def _n(x):
@@ -254,15 +304,26 @@ def report(res):
     if res["orders"]:
         lines.append("Proposed orders, sells first (place_stock_order arguments, nothing has been placed):")
         for o in res["orders"]:
+            if o.get("market") == "br":
+                lines.append("  %s %s %s, limitada a %s, validade dia  (cerca de %s)" % (
+                    "VENDA" if o["side"] == "sell" else "COMPRA", o["qty"], o["symbol"],
+                    money(float(o["limit_price"])), money(o["_usd"])))
+                continue
             amt = ('notional "%s"' % o["notional"]) if "notional" in o else ('qty "%s"' % o["qty"])
             lines.append("  %s %s %s, %s, %s  (about %s)" % (o["side"], o["symbol"], amt, o["type"],
                                                              o["time_in_force"], money(o["_usd"])))
-        lines.append("Cash after, if all of them fill: about %s." % money(res["cash_after"]))
+        lines.append(("Caixa depois, se tudo executar: cerca de %s." if _MKT[0] == "br" else
+                      "Cash after, if all of them fill: about %s.") % money(res["cash_after"]))
     else:
-        lines.append("Nothing is outside the band. No trades.")
+        lines.append("Nada fora da banda. Sem operações." if _MKT[0] == "br" else "Nothing is outside the band. No trades.")
     for n in res["notes"]:
         lines.append("Note: " + n)
     lines.append("")
+    if _MKT[0] == "br":
+        lines.append("Vender pode gerar IR: confira com ir_br.py (trader-tax) antes. Depois o trader-risk confere "
+                     "cada boleta e o trader-broker pede o seu sim para cada uma.")
+        lines.append("Educação e ferramenta, não recomendação de investimento.")
+        return "\n".join(lines)
     lines.append("Selling can realize a taxable gain: check trader-tax (lots.py sell) first. Then trader-risk "
                  "checks every order and trader-broker asks you yes or no for each one.")
     lines.append("Education and tooling, not financial advice.")
@@ -287,7 +348,18 @@ def main(argv=None):
         pdoc = read_json(a.prices, "prices (trader-alerts: alerts.py quote --holdings --write)")
         prices = {str(k).upper(): float(v) for k, v in (pdoc.get("prices", pdoc) or {}).items()
                   if isinstance(v, (int, float))}
-        weights = parse_targets(read_json(a.targets, "targets"), cfg.get("blocked"))
+        tdoc = read_json(a.targets, "targets")
+        weights = parse_targets(tdoc, cfg.get("blocked"))
+        mk = str(cfg.get("market") or (tdoc.get("market") if isinstance(tdoc, dict) else "") or "").lower()
+        if not mk:
+            mk = "br" if weights and all(b3.market_of(t) == "br" for t in weights) else "us"
+        _MKT[0] = mk
+        if mk == "br":
+            prices = {b3.base(k): v for k, v in prices.items()}
+            weights = {b3.base(k): v for k, v in weights.items()}
+            if portfolio:
+                portfolio = dict(portfolio, positions=[dict(x, ticker=b3.base(x.get("ticker") or x.get("symbol") or ""))
+                                                       for x in portfolio.get("positions", [])])
         res = plan(portfolio, prices, weights, cfg, a.band, a.sell_untracked)
         if a.write and res["orders"]:
             d = os.path.dirname(a.write)
@@ -296,10 +368,11 @@ def main(argv=None):
             with open(a.write, "w", encoding="utf-8") as fh:
                 json.dump({"created_by": "trader-rebalance",
                            "created_at": datetime.datetime.now().replace(microsecond=0).isoformat(),
-                           "status": "proposed", "paper": bool(cfg.get("paper", True)),
+                           "status": "proposed", "paper": bool(cfg.get("paper", True)), "market": _MKT[0],
                            "note": ("Proposals only, sells first. Nothing is placed until trader-risk passes "
                                     "each order and you say yes to it in the chat."),
-                           "prices_as_of": pdoc.get("as_of", ""), "orders": clean(res["orders"])}, fh, indent=2)
+                           "prices_as_of": pdoc.get("as_of", ""), "orders": clean(res["orders"])}, fh, indent=2,
+                          ensure_ascii=False)
                 fh.write("\n")
     except RebalanceError as e:
         print("rebalance.py: %s" % e, file=sys.stderr)

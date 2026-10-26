@@ -1,0 +1,20 @@
+{
+  "market": "br",
+  "budget": 20000,
+  "cash_buffer_pct": 10,
+  "max_position_pct": 25,
+  "max_order_brl": 10000,
+  "min_order_brl": 50,
+  "max_orders_per_day": 15,
+  "limit_buffer_pct": 0.5,
+  "paper": true,
+  "blocked": [],
+  "allow_options": false,
+  "allow_margin": false,
+  "allow_short": false,
+  "asset_types": {},
+  "round_lots": {},
+  "rebalance_band_pct": 5,
+  "prejuizo_acumulado": {"comum": 0, "daytrade": 0, "fii": 0},
+  "irrf_saldo": 0
+}

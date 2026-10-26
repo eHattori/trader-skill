@@ -1,119 +1,130 @@
 ---
 name: trader-budget
 description: >-
-  Budget Manager. Sizes every position to your budget before anything is
-  bought: keeps a cash buffer, caps any one stock (the excess is shared out to
-  the others), drops slices under your minimum order, rounds so every dollar
-  is used, supports fractional or whole shares, and writes the proposed buy
-  orders to trader/orders.json in the exact shape of Alpaca's
-  place_stock_order (notional as a string). Nothing is placed. Use when the
-  user says "I have $5,000", "size my trades", "how much of each should I
-  buy", "manage my budget", "split my money", "keep 10% in cash", "no stock
-  over 25%", "set my rules", or after /trader-copycat writes targets.
-argument-hint: "[budget in dollars]"
+  O Gestor de Orçamento. Dimensiona cada posição ao seu orçamento antes de
+  qualquer compra: guarda um caixa, limita o peso de cada ativo (o excesso vai
+  para os outros), descarta fatias abaixo da ordem mínima e arredonda para
+  usar cada real. Na B3: quantidades inteiras, lote padrão (100 ações) mais o
+  fracionário (ticker + F), ordem limitada com folga sobre a cotação, valores
+  em reais. Nos EUA: dólares fracionados no formato do place_stock_order da
+  Alpaca. Grava as boletas propostas em trader/orders.json; nada é enviado.
+  Use quando o usuário disser "tenho R$ 20 mil", "quanto compro de cada",
+  "dividir meu dinheiro", "manter 10% em caixa", "nenhuma ação acima de 25%",
+  "dimensionar", "I have $5,000", "size my trades", ou depois do /trader-copycat.
+argument-hint: "[orçamento]"
 ---
 
 # trader-budget
 
-The Budget Manager turns "copy this portfolio" into "buy exactly this much of
-each", inside rules the user sets once. It writes proposals only. trader-risk
-checks them and trader-broker asks the user yes or no for each one.
+O Gestor de Orçamento transforma "copiar esta carteira" em "comprar
+exatamente isto de cada ativo", dentro de regras definidas uma vez. Ele só
+escreve propostas: o `/trader-risk` confere e o `/trader-broker` pede o seu
+sim para cada uma.
 
-`${CLAUDE_SKILL_DIR}` below is this skill's folder (where this SKILL.md lives).
+`${CLAUDE_SKILL_DIR}` é a pasta desta skill.
 
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/size.py"                       # trader/targets.json + trader/config.json
-python3 "${CLAUDE_SKILL_DIR}/size.py" --budget 5000 --write # write trader/orders.json
-python3 "${CLAUDE_SKILL_DIR}/size.py" --whole-shares --prices trader/prices.json
-python3 "${CLAUDE_SKILL_DIR}/size.py" --weights AAPL=22.04,AXP=17.14,GOOGL=12.62 --json
+python3 "${CLAUDE_SKILL_DIR}/size.py"                             # trader/targets.json + trader/config.json
+python3 "${CLAUDE_SKILL_DIR}/size.py" --budget 20000 --write      # grava trader/orders.json
+python3 "${CLAUDE_SKILL_DIR}/size.py" --weights PETR4=30,VALE3=25,ITUB4=20,BOVA11=15,MXRF11=10 --budget 20000
+python3 "${CLAUDE_SKILL_DIR}/size.py" --market us --weights AAPL=22.04,AXP=17.14 --budget 5000 --json
 ```
 
-## What it reads and writes
+## O que lê e grava
 
-| file | what |
+| arquivo | o quê |
 | --- | --- |
-| `trader/config.json` | the rules (start from `config.example.json` in this folder) |
-| `trader/targets.json` | the weights to copy, written by trader-copycat (`targets.example.json` here) |
-| `trader/prices.json` | only for whole shares or share counts (trader-alerts writes it) |
-| `trader/orders.json` | the proposed buy orders it writes with `--write` |
+| `trader/config.json` | as regras (`config_br.example.json` para a B3, `config.example.json` para os EUA) |
+| `trader/targets.json` | os pesos a copiar, do trader-copycat |
+| `trader/prices.json` | cotações (o trader-alerts grava); **obrigatório na B3** |
+| `trader/orders.json` | as boletas propostas, com `--write` |
 
-## Step 1: set the rules once
+`b3.py` e `b3_ativos.json` nesta pasta guardam as regras da B3 (tipo de ativo,
+lote, calendário); `asset_types` e `round_lots` no config corrigem qualquer ativo.
 
-If `trader/config.json` does not exist, copy `config.example.json` into
-`trader/config.json` and ask the user for each value in plain words:
+## Passo 1: as regras, uma vez
 
-- **budget**: how much money this is for. Only money they can afford to lose.
-- **cash_buffer_pct**: how much stays in cash (default 10).
-- **max_position_pct**: the most any one stock may be, as a percent of the budget (default 25).
-- **max_order_usd** and **min_order_usd**: the biggest and smallest single order (2000 and 5).
-- **fractional**: true if the broker buys fractional shares (Alpaca does); false for whole shares.
-- **blocked**: tickers they never want to own.
-- Keep **paper** true until they have watched it work on a paper account.
+Se `trader/config.json` não existe, copie o exemplo do mercado e pergunte cada
+valor em palavras simples:
 
-## Step 2: size it
+- **market**: `"br"` (B3) ou `"us"`. Uma pasta de projeto por mercado.
+- **budget**: quanto dinheiro é para isto. Só o que pode perder.
+- **cash_buffer_pct**: quanto fica em caixa (padrão 10).
+- **max_position_pct**: o máximo de um ativo, em % do orçamento (padrão 25).
+- **min_order / max_order** (`min_order_brl`, `max_order_brl` na B3;
+  `min_order_usd`, `max_order_usd` nos EUA): a menor e a maior boleta.
+- **limit_buffer_pct** (B3): folga do preço limite sobre a cotação (padrão 0,5%).
+- **blocked**: tickers que o usuário nunca quer ter.
+- EUA: **fractional** (Alpaca compra fração) e **paper** true até ver funcionar.
 
-```bash
-python3 "${CLAUDE_SKILL_DIR}/size.py" --write
+## Passo 2: dimensionar
+
+A conta, em ordem: o caixa sai primeiro; os pesos voltam a somar 100 entre os
+ativos que ficaram; quem passa do teto fica no teto e o excesso é dividido
+entre os outros, até ninguém passar; uma fatia abaixo da ordem mínima é
+descartada e o peso dela redistribuído; o arredondamento sobra para o maior
+ativo fora do teto, para nada ficar parado por acaso.
+
+**Na B3**: não existe compra por valor. A ferramenta usa o preço limite
+(cotação + folga) para calcular quantas ações inteiras cabem, sem nunca passar
+do orçamento, e divide a quantidade em lote padrão + fracionário: 132 PETR4
+viram 100 PETR4 + 32 PETR4F. Ações e units têm lote de 100; FIIs, ETFs e BDRs,
+de 1 (sem fracionário). Um "11" fora da lista conhecida é tratado como FII e
+marcado "tipo deduzido, confirme": confirme com o usuário.
+
+## Passo 3: mostrar ao usuário
+
+Mostre a tabela: ticker, tipo, peso, valor, preço limite, quantidade, lote,
+quem bateu no teto, o caixa e a sobra. Diga de onde vêm os pesos e a idade
+deles (CDA de um mês, 13F de até 45 dias). Depois passe para o `/trader-risk`.
+
+## Exemplo (B3)
+
+R$ 20.000, caixa de 10%, teto de 25%, PETR4 30 / VALE3 25 / ITUB4 20 / BOVA11
+15 / MXRF11 10, cotações 37,42 / 58,10 / 36,05 / 141,20 / 9,71:
+
+```
+PETR4   ação   30.00%  R$ 4.964,52   R$ 37,61    132   100  no teto de 25%
+VALE3   ação   25.00%  R$ 4.612,81   R$ 58,39     79   100
+ITUB4   ação   20.00%  R$ 3.695,46   R$ 36,23    102   100
+BOVA11  ETF    15.00%  R$ 2.838,20  R$ 141,91     20     1
+MXRF11  FII    10.00%  R$ 1.883,68    R$ 9,76    193     1  tipo deduzido, confirme
+  COMPRA 100 PETR4 + 32 PETR4F, 79 VALE3F, 100 ITUB4 + 2 ITUB4F, 20 BOVA11, 193 MXRF11
 ```
 
-The maths, in order: the cash buffer comes off the top; the weights are
-renormalised to 100 over the stocks that are left; any stock over the cap is
-pinned at the cap and its excess is shared over the others by weight, again
-until nobody is over; a slice under the minimum order is dropped and its
-weight shared out; amounts are rounded to whole dollars and the rounding
-dollar goes to the biggest stock that is not capped, so nothing is left
-idle by accident. Money that truly cannot be invested (every stock at its
-cap, or whole shares that do not divide evenly) is shown as "left idle".
+## Exemplo (EUA)
 
-## Step 3: show the user
+13F da Berkshire do 2º tri de 2026, top 5 (30,67 / 23,85 / 17,56 / 15,11 /
+12,80), US$ 5.000, caixa 10%, teto 25%: AAPL US$ 1.250 (no teto), AXP US$
+1.119, GOOGL US$ 823, KO US$ 708, BAC US$ 600, US$ 500 em caixa. A primeira
+ordem é `{"symbol": "AAPL", "side": "buy", "notional": "1250", "type":
+"market", "time_in_force": "day"}`.
 
-Show the table: ticker, weight, dollars, which stock hit the cap, the cash
-buffer and what is left idle. Say where the weights came from and how old
-they are (a 13F is up to 45 days old when it is filed). Then hand over to
-`/trader-risk`.
+## Regras
 
-## Example: the reel
+- Só propostas. Esta skill nunca chama corretora.
+- Nunca dimensione um dinheiro que o usuário não disse que é para isto.
+- Todo número vem do config, dos pesos ou das cotações. Nada é chutado.
+- Sem projeções: nunca diga quanto as posições vão valer ou render.
+- Na B3 (e nos EUA com ações inteiras), preço real em `trader/prices.json`;
+  nunca invente uma cotação.
 
-Berkshire Hathaway's Q2 2026 13F (filed 2026-08-14), top five: Apple 22.04%,
-American Express 17.14%, Alphabet 12.62%, Coca-Cola 10.86%, Bank of America
-9.20%. Renormalised over those five: 30.67 / 23.85 / 17.56 / 15.11 / 12.80.
-A $5,000 budget, a 10% cash buffer and a 25% cap:
+## O que ele nunca faz
 
-| stock | dollars | |
-| --- | --- | --- |
-| AAPL | $1,250 | capped at 25% |
-| AXP | $1,119 | |
-| GOOGL | $823 | |
-| KO | $708 | |
-| BAC | $600 | |
-| cash buffer | $500 | |
-| left idle | $0 | |
+Nunca envia, aprova ou agenda uma ordem, nunca aumenta um limite sozinho e
+nunca dimensiona opções, margem ou venda a descoberto.
 
-The first order it writes is
-`{"symbol": "AAPL", "side": "buy", "notional": "1250", "type": "market", "time_in_force": "day"}`.
-Keep the weights to two decimals or more: weights already rounded to one
-decimal (30.7 / 23.9 / ...) can move a slice by a dollar.
+## Segurança
 
-## Rules
-
-- Proposals only. This skill never calls a broker tool.
-- Never size money the user has not said is for this. Ask for the budget.
-- Every number comes from the config, the targets or the prices. Nothing is guessed.
-- No projections: never say what the positions will be worth or earn.
-- Whole shares need real prices from `trader/prices.json`; never invent a price.
-
-## What it never does
-
-It never places, approves or schedules an order, never raises a limit on its
-own, and never sizes options, margin or short positions.
-
-## Safety
-
-- Education and tooling, not financial advice. Nothing here predicts prices or promises returns.
-- Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
-- Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
-  passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
-  user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"
-  (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
-- No options, margin, short selling or leverage unless the config allows it and the user confirms.
-- Broker keys live in environment variables or the Claude Desktop config, never in the chat.
+- Educação e ferramenta, não recomendação de investimento (not financial advice).
+- B3: nenhuma skill envia ordem. Cada boleta só vai para o seu home broker
+  depois que o `/trader-risk` aprovou aquela boleta hoje e você disse "sim" a
+  ela no chat; quem digita e envia é você.
+- EUA: só o `/trader-broker` leva a uma ordem, depois do `/trader-risk`, do seu
+  "yes" explícito para aquela ordem e do clique em Allow once (ferramenta da
+  corretora em "Needs approval", nunca "Always allow"). Paper trading é o
+  padrão (`"paper": true`); ir para conta real é decisão sua.
+- Sem opções, margem, venda a descoberto ou alavancagem, a menos que o config
+  permita e você confirme.
+- Chaves (Alpaca, `BRAPI_TOKEN`) ficam em variáveis de ambiente ou no config do
+  Claude Desktop, nunca no chat.

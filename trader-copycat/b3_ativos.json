@@ -1,0 +1,16 @@
+{
+  "_nota": "Lista parcial de ETFs e units da B3, usada para separar os tickers terminados em 11 (FII, ETF ou unit). Um 11 fora destas listas é tratado como FII e marcado como suposição. Corrija qualquer ativo em trader/config.json, chave asset_types, por exemplo {\"XPTO11\": \"etf\"}. Copiada, idêntica, em cada skill que opera na B3.",
+  "etf": [
+    "BOVA11", "BOVV11", "BOVB11", "BOVX11", "XBOV11", "PIBB11", "SMAL11", "SMAC11",
+    "IVVB11", "SPXI11", "NASD11", "ACWI11", "WRLD11", "EURP11", "XINA11", "TECK11",
+    "DIVO11", "FIND11", "ECOO11", "MATB11", "BRAX11", "GOLD11",
+    "HASH11", "QBTC11", "QETH11", "BITH11", "WEB311",
+    "IMAB11", "IRFM11", "FIXA11", "B5P211", "LFTS11", "NTNS11"
+  ],
+  "unit": [
+    "TAEE11", "SANB11", "KLBN11", "ENGI11", "ALUP11", "BPAC11", "SAPR11", "IGTI11",
+    "BRBI11", "PPLA11", "RNEW11"
+  ],
+  "fii": [],
+  "bdr": []
+}

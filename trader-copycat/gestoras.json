@@ -1,0 +1,28 @@
+{
+  "_nota": "Nomes de fundos de ações brasileiros para a busca (fundos.py busca). Sem CNPJ de propósito: o CNPJ vem da CDA da CVM na hora da busca, e o usuário escolhe a classe. A lista não é recomendação; é só um atalho de nomes conhecidos.",
+  "buscas": [
+    "dynamo cougar",
+    "verde acoes",
+    "spx falcon",
+    "alaska black",
+    "atmos acoes",
+    "squadra long only",
+    "absolute pace",
+    "truxt long bias",
+    "ibiuna acoes",
+    "kapitalo",
+    "moat capital",
+    "bogari value",
+    "real investor",
+    "charles river",
+    "tarpon",
+    "leblon acoes",
+    "velt",
+    "constellation",
+    "guepardo",
+    "perfin",
+    "organon",
+    "oceana",
+    "navi"
+  ]
+}

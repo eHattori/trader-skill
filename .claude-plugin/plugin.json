@@ -1,21 +1,24 @@
 {
   "name": "trader-skill",
-  "description": "11 Claude skills that copy the investors you trust, watch the news and Congress, size every trade to your budget, and never place an order without your yes.",
-  "version": "1.0.0",
+  "description": "12 skills do Claude para a B3 e para os EUA: copiam a carteira de fundos e gestores, acompanham fatos relevantes, insiders e o Congresso americano, dimensionam cada boleta ao seu orçamento, apuram o IR e nunca enviam uma ordem sem o seu sim.",
+  "version": "1.1.0",
   "author": {
-    "name": "Jake Schincariol",
-    "url": "https://opusjake.ai"
+    "name": "Eduardo Hattori",
+    "url": "https://github.com/eHattori"
   },
-  "homepage": "https://github.com/Jakeschincariol/trader-skill",
-  "repository": "https://github.com/Jakeschincariol/trader-skill",
+  "homepage": "https://github.com/eHattori/trader-skill",
+  "repository": "https://github.com/eHattori/trader-skill",
   "license": "MIT",
   "keywords": [
     "claude-code",
     "claude-skills",
     "investing",
+    "b3",
+    "cvm",
+    "brasil",
+    "imposto-de-renda",
     "13f",
     "stock-market",
-    "congress-trades",
     "portfolio"
   ],
   "skills": "./"

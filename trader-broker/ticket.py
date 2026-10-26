@@ -25,6 +25,15 @@ things around the one moment that matters, your yes:
     python3 ticket.py log
 
 Everything is written to trader/state/broker.json (append only).
+
+B3 ("market": "br"): there is no broker connector for Brazilian brokers, so
+the ticket is a boleta you type into your home broker yourself. The flow is
+the same, in Portuguese: show the boleta, record your "sim" word for word,
+you send it in the home broker, then `result --status placed` (you sent it),
+`denied` (you gave up) or `failed` (the home broker rejected it), and `fill`
+with the executed price and the fees from the nota de corretagem. Fills go to
+trader/portfolio.json at average cost (preço médio, the Brazilian tax rule)
+and to its "trades" list, which trader-tax reads.
 """
 
 import argparse
@@ -35,15 +44,23 @@ import os
 import re
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import b3  # noqa: E402  (regras da B3)
+
 ALPACA_FIELDS = ("symbol", "side", "qty", "notional", "type", "time_in_force", "limit_price",
                  "stop_price", "trail_price", "trail_percent", "extended_hours", "client_order_id",
                  "order_class", "take_profit_limit_price", "stop_loss_stop_price",
-                 "stop_loss_limit_price", "advanced_instructions")
+                 "stop_loss_limit_price", "advanced_instructions", "market")
 STRING_FIELDS = ("qty", "notional", "limit_price", "stop_price", "trail_price", "trail_percent",
                  "take_profit_limit_price", "stop_loss_stop_price", "stop_loss_limit_price")
 TIF_WORDS = {"day": "good for today", "gtc": "good until canceled", "opg": "at the open",
              "cls": "at the close", "ioc": "immediate or cancel", "fok": "fill or kill"}
-YES_WORDS = ("yes", "y")
+YES_WORDS = ("yes", "y", "sim", "s")
+TIF_PT = {"day": "validade: hoje (dia)", "gtc": "validade: até cancelar", "ioc": "executa ou cancela",
+          "fok": "tudo ou nada"}
+BATCH_PT = {"todas", "todos", "tudo", "ambas", "ambos", "resto", "restante", "restantes", "demais", "cada"}
+DOUBT_PT = {"não", "nao", "espera", "espere", "cancela", "cancele", "mas", "talvez", "depois", "segura",
+            "se", "menos", "porém", "porem"}
 BATCH_WORDS = {"all", "every", "everything", "rest", "remaining", "them", "both", "batch", "each"}
 DOUBT_WORDS = {"no", "not", "dont", "don't", "wait", "cancel", "stop", "but", "maybe", "later",
                "hold", "unless", "if"}
@@ -73,7 +90,7 @@ def write_json(path, data):
         os.makedirs(d, exist_ok=True)
     tmp = path + ".tmp"
     with open(tmp, "w", encoding="utf-8") as fh:
-        json.dump(data, fh, indent=2)
+        json.dump(data, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
     os.replace(tmp, path)
 
@@ -121,8 +138,33 @@ def _money(v):
     return "$" + (s[:-3] if s.endswith(".00") else s)
 
 
+def is_br(order, cfg=None):
+    m = order.get("market") or (cfg or {}).get("market")
+    return (str(m).lower() == "br") if m else b3.market_of(order.get("symbol", "")) == "br"
+
+
+def plain_br(order):
+    """COMPRA 100 PETR4 (lote padrão), limitada a R$ 37,61, validade: hoje (dia)"""
+    side = "COMPRA" if str(order.get("side")) == "buy" else "VENDA"
+    sym = b3.clean(order.get("symbol", "?"))
+    lotm = "fracionário" if sym.endswith("F") and sym != b3.base(sym) else "lote padrão"
+    q = _str_num(order.get("qty"))
+    typ = str(order.get("type", "limit"))
+    if typ == "limit":
+        how = "limitada a %s" % b3.money(float(order.get("limit_price")), "br", True)
+    elif typ == "stop_limit":
+        how = "stop %s, limite %s" % (b3.money(float(order.get("stop_price")), "br", True),
+                                      b3.money(float(order.get("limit_price")), "br", True))
+    else:
+        how = "a mercado"
+    tif = TIF_PT.get(str(order.get("time_in_force", "day")), order.get("time_in_force"))
+    return "%s %s %s (%s), %s, %s" % (side, q, sym, lotm, how, tif)
+
+
 def plain(order):
     """BUY $1,250 of AAPL, market order, good for today"""
+    if is_br(order):
+        return plain_br(order)
     side = str(order.get("side", "")).upper()
     sym = order.get("symbol", "?")
     if order.get("notional") is not None:
@@ -154,8 +196,44 @@ def amount_numbers(order):
     return nums
 
 
+def parse_sim(reply, order, batch_symbols=()):
+    """B3: a reply that starts with "sim" (or "yes") for THIS one boleta. Returns (ok, why)."""
+    raw = (reply or "").strip()
+    if not raw:
+        return False, "a resposta está vazia"
+    if "?" in raw:
+        return False, "a resposta é uma pergunta, não um sim"
+    words = re.findall(r"[a-zà-ú']+", raw.lower())
+    if not words or words[0] not in YES_WORDS:
+        return False, "só vale uma resposta que comece com \"sim\" (não ok, pode, manda, beleza)"
+    if (BATCH_PT | BATCH_WORDS) & set(words):
+        return False, "um sim vale para uma boleta por vez, não para o lote"
+    if (DOUBT_PT | DOUBT_WORDS) & set(words[1:]):
+        return False, "a resposta tem uma condição ou dúvida; pergunte de novo"
+    sym = b3.clean(order.get("symbol", ""))
+    tokens = set(re.findall(r"[A-Z][A-Z0-9]{3,6}", raw.upper()))
+    others = {b3.clean(s) for s in batch_symbols} - {sym}
+    named = tokens & others
+    if named:
+        return False, "a resposta cita %s, mas esta boleta é de %s" % (", ".join(sorted(named)), sym)
+    nums = []
+    for n in re.findall(r"\d[\d.]*(?:,\d+)?", re.sub(r"[A-Z]{4}\d{1,2}F?", " ", raw.upper())):
+        try:
+            nums.append(b3.parse_brl(n))
+        except ValueError:
+            pass
+    if nums:
+        want = amount_numbers(order)
+        if not any(abs(n - w) < 0.005 for n in nums for w in want):
+            return False, "a resposta diz %s, mas a boleta é %s" % (
+                ", ".join(_str_num(n) for n in nums), plain_br(order))
+    return True, "sim explícito para %s" % plain_br(order)
+
+
 def parse_yes(reply, order, batch_symbols=()):
     """Is this reply an explicit yes for THIS one order? Returns (ok, why)."""
+    if is_br(order):
+        return parse_sim(reply, order, batch_symbols)
     raw = (reply or "").strip()
     if not raw:
         return False, "the reply is empty"
@@ -212,23 +290,62 @@ def risk_verdict(risk, fp, today):
 def status_of(order, risk, state, today):
     """(ready, label, risk_result)"""
     fp = fingerprint(order)
+    br = is_br(order)
     rv, why = risk_verdict(risk, fp, today)
     if rv is None:
-        return False, "NOT READY: " + why, None
+        return False, ("NÃO PRONTA: " if br else "NOT READY: ") + why, None
     if rv.get("verdict") != "PASS":
-        return False, "BLOCKED by trader-risk: " + "; ".join(rv.get("reasons", [])), rv
+        return False, ("BLOQUEADA pelo trader-risk: " if br else "BLOCKED by trader-risk: ") + \
+            "; ".join(rv.get("reasons", [])), rv
     rec = latest(state, fp, today)
     if rec:
         st = rec.get("status")
         if st == "approved":
+            if br:
+                return False, "APROVADA por você às %s, aguardando você enviar no home broker" % rec.get("at"), rv
             return False, "APPROVED by you at %s, waiting for the place_stock_order call" % rec.get("at"), rv
-        return False, "DONE: %s at %s" % (st, rec.get("at")), rv
+        return False, ("FEITA: %s às %s" if br else "DONE: %s at %s") % (st, rec.get("at")), rv
+    if br:
+        return True, "PRONTA: trader-risk aprovou, aguardando o seu sim", rv
     return True, "READY: trader-risk PASS, waiting for your yes", rv
 
 
 # ---------------------------------------------------------------- rendering
 
+def render_br(order, idx, total, cfg, risk, state, today):
+    ready, label, rv = status_of(order, risk, state, today)
+    sym = b3.clean(order.get("symbol", ""))
+    kind, guess = b3.asset_type(sym, cfg.get("asset_types"))
+    lines = ["BOLETA %d de %d, B3, você executa no home broker da sua corretora" % (idx, total),
+             "  " + plain_br(order)]
+    lines.append("  ativo: %s %s%s" % (b3.TYPE_NAMES.get(kind, kind), b3.base(sym),
+                                      " (tipo deduzido do ticker, confira)" if guess else ""))
+    try:
+        qty = float(order.get("qty"))
+        px = float(order.get("limit_price") or order.get("stop_price") or 0)
+        if px:
+            lines.append("  valor máximo: %s (sem corretagem e emolumentos)" % b3.money(qty * px, "br", True))
+    except (TypeError, ValueError):
+        pass
+    if order.get("why"):
+        lines.append("  motivo: " + order["why"])
+    lines.append("  " + label)
+    for w in (rv or {}).get("warnings", []):
+        lines.append("  atenção: " + w)
+    lines.append("  Na boleta do home broker: %s, quantidade %s, tipo %s%s, validade %s." % (
+        "Compra" if order.get("side") == "buy" else "Venda", _str_num(order.get("qty")),
+        {"limit": "limitada", "stop_limit": "stop limitada"}.get(str(order.get("type")), "a mercado"),
+        (", preço %s" % b3.money(float(order["limit_price"]), "br", True)) if order.get("limit_price") else "",
+        {"day": "dia", "gtc": "até cancelar"}.get(str(order.get("time_in_force", "day")), order.get("time_in_force"))))
+    if ready:
+        lines.append("  Responda \"sim\" para aprovar esta boleta, ou \"não\" para pular.")
+        lines.append("  Depois de enviar no home broker: ticket.py result --index %d --status placed" % idx)
+    return "\n".join(lines), ready
+
+
 def render(order, idx, total, cfg, risk, state, today):
+    if is_br(order, cfg):
+        return render_br(order, idx, total, cfg, risk, state, today)
     ready, label, rv = status_of(order, risk, state, today)
     broker = str(cfg.get("broker", "alpaca")).lower()
     paper = cfg.get("paper", True)
@@ -256,6 +373,10 @@ def render(order, idx, total, cfg, risk, state, today):
 
 def ticket_json(order, idx, cfg, risk, state, today):
     ready, label, rv = status_of(order, risk, state, today)
+    if is_br(order, cfg):
+        return {"index": idx, "ready": ready, "status": label, "plain": plain(order),
+                "fingerprint": fingerprint(order), "market": "br", "broker": "home broker (manual)",
+                "tool": None, "boleta": tool_input(order), "why": order.get("why", "")}
     return {"index": idx, "ready": ready, "status": label, "plain": plain(order),
             "fingerprint": fingerprint(order), "paper": bool(cfg.get("paper", True)),
             "broker": cfg.get("broker", "alpaca"), "tool": "place_stock_order",
@@ -264,7 +385,46 @@ def ticket_json(order, idx, cfg, risk, state, today):
 
 # ---------------------------------------------------------------- fills -> lots
 
-def apply_fill(portfolio_path, cfg, symbol, side, qty, price, date):
+def apply_fill_br(pf, symbol, side, qty, price, date, fees=0.0):
+    """B3: average cost (preço médio). Fees from the nota de corretagem add to a
+    buy's cost and come off a sale's proceeds. Every fill is appended to
+    pf["trades"], which trader-tax reads to compute the monthly income tax."""
+    t = b3.base(symbol)
+    qty, price, fees = float(qty), float(price), float(fees or 0)
+    if abs(qty - round(qty)) > 1e-9:
+        raise TicketError("na B3 a quantidade é inteira, não %s" % qty)
+    pos = None
+    for p in pf.setdefault("positions", []):
+        if b3.base(p.get("ticker", "")) == t:
+            pos = p
+    gross = round(qty * price, 2)
+    if side == "buy":
+        if pos is None:
+            pos = {"ticker": t, "shares": 0, "cost": 0.0}
+            pf["positions"].append(pos)
+        pos["shares"] = int(round(float(pos.get("shares", 0)) + qty))
+        pos["cost"] = round(float(pos.get("cost", 0)) + gross + fees, 2)
+        pf["cash"] = round(float(pf.get("cash", 0)) - gross - fees, 2)
+    else:
+        held = float(pos.get("shares", 0)) if pos else 0
+        if held + 1e-9 < qty:
+            raise TicketError("não dá para registrar a venda de %s %s: a carteira tem %s" % (int(qty), t, int(held)))
+        avg = float(pos.get("cost", 0)) / held if held else 0
+        pos["cost"] = round(float(pos.get("cost", 0)) - avg * qty, 2)
+        pos["shares"] = int(round(held - qty))
+        if pos["shares"] <= 0:
+            pf["positions"].remove(pos)
+        pf["cash"] = round(float(pf.get("cash", 0)) + gross - fees, 2)
+    if pos and pos in pf["positions"] and pos["shares"]:
+        pos["avg_price"] = round(pos["cost"] / pos["shares"], 4)
+    pf.setdefault("trades", []).append({"date": date, "ticker": t, "symbol": b3.clean(symbol), "side": side,
+                                        "qty": int(round(qty)), "price": price, "fees": fees})
+    pf["market"] = "br"
+    pf["currency"] = "BRL"
+    return pf
+
+
+def apply_fill(portfolio_path, cfg, symbol, side, qty, price, date, fees=0.0):
     """Record a filled order in trader/portfolio.json (a lot for a buy, FIFO for a sell)."""
     pf = read_json(portfolio_path, "portfolio", required=False)
     if pf is None:
@@ -272,6 +432,10 @@ def apply_fill(portfolio_path, cfg, symbol, side, qty, price, date):
         if not budget:
             raise TicketError("no %s yet and no budget in the config to start it from" % portfolio_path)
         pf = {"cash": float(budget), "positions": []}
+    if str(cfg.get("market") or "").lower() == "br" or b3.market_of(symbol) == "br":
+        pf = apply_fill_br(pf, symbol, side, qty, price, date, fees)
+        write_json(portfolio_path, pf)
+        return pf
     symbol = symbol.upper()
     qty, price = float(qty), float(price)
     cost = round(qty * price, 2)
@@ -344,8 +508,12 @@ def cmd_show(a):
         blocks.append(text)
         any_ready = any_ready or ready
     print("\n\n".join(blocks))
-    print("\nOne order at a time: a yes covers one ticket, never the batch. Education and tooling, "
-          "not financial advice.")
+    if any(is_br(o, cfg) for _, o in picks):
+        print("\nUma boleta por vez: um sim vale para uma boleta, nunca para o lote. Educação e ferramenta, "
+              "não recomendação de investimento.")
+    else:
+        print("\nOne order at a time: a yes covers one ticket, never the batch. Education and tooling, "
+              "not financial advice.")
     return 0 if any_ready else 1
 
 
@@ -354,17 +522,31 @@ def cmd_approve(a):
     order = _pick(orders, a.index)
     ready, label, rv = status_of(order, risk, state, today)
     if not ready:
-        raise TicketError("order %d is not ready: %s" % (a.index, label))
+        raise TicketError(("a boleta %d não está pronta: %s" if is_br(order, cfg)
+                           else "order %d is not ready: %s") % (a.index, label))
     ok, why = parse_yes(a.reply, order, [o.get("symbol", "") for o in orders])
     if not ok:
-        print("Not recorded: %s. Ask the user again with the ticket for order %d." % (why, a.index))
+        if is_br(order, cfg):
+            print("Não registrado: %s. Pergunte de novo com a boleta %d." % (why, a.index))
+        else:
+            print("Not recorded: %s. Ask the user again with the ticket for order %d." % (why, a.index))
         return 1
     rec = {"at": now_iso(), "date": today, "index": a.index, "fingerprint": fingerprint(order),
            "symbol": str(order.get("symbol", "")).upper(), "side": order.get("side"),
            "plain": plain(order), "status": "approved", "reply": a.reply,
            "paper": bool(cfg.get("paper", True)), "broker": cfg.get("broker", "alpaca")}
+    if is_br(order, cfg):
+        rec.update({"market": "br", "broker": "home broker", "order": tool_input(order)})
+        rec.pop("paper", None)
     state.setdefault("orders", []).append(rec)
     write_json(a.state, state)
+    if is_br(order, cfg):
+        print("Registrei o seu sim para a boleta %d: %s." % (a.index, plain(order)))
+        print("Agora digite a boleta no home broker da sua corretora, exatamente assim. Depois:")
+        print("  ticket.py result --index %d --status placed   (enviou)" % a.index)
+        print("  ticket.py result --index %d --status denied   (desistiu)" % a.index)
+        print("  ticket.py result --index %d --status failed --note \"motivo\"   (rejeitada)" % a.index)
+        return 0
     print("Recorded your yes for order %d: %s." % (a.index, plain(order)))
     if str(cfg.get("broker", "alpaca")).lower() == "ibkr":
         print("Now draft it with the Interactive Brokers connector; approve it in your IBKR account.")
@@ -394,18 +576,36 @@ def cmd_result(a):
     fp = fingerprint(order)
     rec = latest(state, fp, today)
     if not rec or rec.get("status") != "approved":
-        raise TicketError("order %d has no yes recorded today; a result can only follow an approval" % a.index)
+        raise TicketError(("a boleta %d não tem sim registrado hoje; o resultado só vem depois da aprovação"
+                           if is_br(order, cfg) else
+                           "order %d has no yes recorded today; a result can only follow an approval") % a.index)
     new = {"at": now_iso(), "date": today, "index": a.index, "fingerprint": fp, "symbol": rec["symbol"],
            "side": rec["side"], "plain": rec["plain"], "status": a.status}
+    if rec.get("market") == "br":
+        new.update({"market": "br", "order": rec.get("order")})
+        try:
+            new["value"] = round(float(order.get("qty")) * float(order.get("limit_price") or 0), 2) or None
+        except (TypeError, ValueError):
+            pass
     if a.broker_id:
         new["broker_order_id"] = a.broker_id
     if a.note:
         new["note"] = a.note
     state["orders"].append(new)
     write_json(a.state, state)
+    if rec.get("market") == "br":
+        print("Registrei a boleta %d como %s." % (a.index, {"placed": "enviada no home broker", "denied":
+              "desistência", "failed": "rejeitada"}[a.status]))
+        if a.status == "placed" and a.filled_qty and a.filled_price:
+            apply_fill(a.portfolio, cfg, rec["symbol"], rec["side"], a.filled_qty, a.filled_price, today, a.fees)
+            print("Adicionei a execução em %s." % a.portfolio)
+        elif a.status == "placed":
+            print("Quando executar, registre com os dados da nota de corretagem: ticket.py fill --symbol %s "
+                  "--side %s --qty Q --price P --fees TAXAS" % (rec["symbol"], rec["side"]))
+        return 0
     print("Recorded order %d as %s." % (a.index, a.status))
     if a.status == "placed" and a.filled_qty and a.filled_price:
-        apply_fill(a.portfolio, cfg, rec["symbol"], rec["side"], a.filled_qty, a.filled_price, today)
+        apply_fill(a.portfolio, cfg, rec["symbol"], rec["side"], a.filled_qty, a.filled_price, today, a.fees)
         print("Added the fill to %s." % a.portfolio)
     elif a.status == "placed":
         print("When it fills, record it for trader-tax: ticket.py fill --symbol %s --side %s --qty Q --price P"
@@ -416,7 +616,15 @@ def cmd_result(a):
 def cmd_fill(a):
     cfg = read_json(a.config, "config", required=False) or {}
     date = a.date or datetime.date.today().isoformat()
-    pf = apply_fill(a.portfolio, cfg, a.symbol, a.side, a.qty, a.price, date)
+    pf = apply_fill(a.portfolio, cfg, a.symbol, a.side, a.qty, a.price, date, a.fees)
+    if pf.get("market") == "br":
+        pos = [p for p in pf.get("positions", []) if p.get("ticker") == b3.base(a.symbol)]
+        print("Registrei %s de %s %s a %s em %s. Caixa agora %s.%s" % (
+            "compra" if a.side == "buy" else "venda", a.qty, b3.base(a.symbol), b3.money(float(a.price), "br", True),
+            date, b3.money(pf["cash"], "br", True),
+            (" Preço médio de %s: %s." % (b3.base(a.symbol), b3.money(pos[0]["avg_price"], "br", True)))
+            if pos and pos[0].get("avg_price") else ""))
+        return 0
     print("Recorded %s %s %s at %s on %s. Cash now %s." % (a.side, a.qty, a.symbol.upper(),
                                                           _money(a.price), date, _money(pf["cash"])))
     return 0
@@ -469,6 +677,7 @@ def main(argv=None):
     p.add_argument("--note")
     p.add_argument("--filled-qty")
     p.add_argument("--filled-price")
+    p.add_argument("--fees", type=float, default=0.0, help="B3: corretagem + emolumentos da nota (R$)")
     p.add_argument("--portfolio", default="trader/portfolio.json")
     p = sub.add_parser("fill", help="add a filled order to trader/portfolio.json")
     p.add_argument("--symbol", required=True)
@@ -476,6 +685,7 @@ def main(argv=None):
     p.add_argument("--qty", required=True)
     p.add_argument("--price", required=True)
     p.add_argument("--date")
+    p.add_argument("--fees", type=float, default=0.0, help="B3: corretagem + emolumentos da nota (R$)")
     p.add_argument("--portfolio", default="trader/portfolio.json")
     p.add_argument("--config", default="trader/config.json")
     p = sub.add_parser("log", help="today's decisions")

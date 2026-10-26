@@ -1,113 +1,116 @@
 ---
 name: trader-alerts
 description: >-
-  Price Alerts. Rings when a price target, a stop or the opening bell hits:
-  above / below / stop rules, percent moves from the previous close, and the
-  NYSE opening bell, each ringing once so you are not spammed. Knows NYSE
-  hours with the 2026 and 2027 holidays and 1:00 p.m. early closes, fetches
-  free delayed quotes (Yahoo chart JSON, Stooq CSV) one ticker at a time, and
-  writes trader/prices.json for the other skills. Use when the user says
-  "alert me when", "tell me if AAPL hits", "set a stop", "price target",
-  "watch my stocks", "is the market open", "when does the market open",
-  "get me prices", or to refresh prices before sizing, risk or tax.
-argument-hint: "[ticker] [price]"
+  Alertas de Preço. Toca quando um preço-alvo, um stop ou a abertura do
+  pregão acontece: regras acima / abaixo / stop, variação percentual sobre o
+  fechamento anterior e abertura do mercado, cada uma tocando uma vez. Na B3:
+  cotações da brapi.dev (API v2, chave em BRAPI_TOKEN) com o Yahoo (PETR4.SA)
+  como reserva, calendário de pregões de 2026 publicado pela B3 (2027
+  provisório) e o horário do mercado à vista, que muda com o horário de verão
+  dos EUA. Nos EUA: Yahoo e o calendário da NYSE. Grava trader/prices.json
+  para as outras skills. Use quando o usuário disser "me avisa quando",
+  "se PETR4 passar de", "coloca um stop", "a bolsa está aberta?", "que horas
+  abre a B3", "atualiza as cotações", "alert me when", "is the market open".
+argument-hint: "[ticker] [preço]"
 ---
 
 # trader-alerts
 
-Price Alerts watches the numbers so the user does not have to. An alert is
-information, never an order: when a stop rings, nothing is sold. If the user
-wants to act, the normal path runs (size, risk, their yes).
+Os Alertas olham os números para o usuário não precisar olhar. Um alerta é
+informação, nunca ordem: quando um stop toca, nada é vendido. Se o usuário
+quiser agir, o caminho normal roda (dimensionar, risco, o sim dele).
 
-`${CLAUDE_SKILL_DIR}` below is this skill's folder (where this SKILL.md lives).
+`${CLAUDE_SKILL_DIR}` é a pasta desta skill.
 
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" clock                         # NYSE open or closed, next open
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" quote AAPL KO --write         # -> trader/prices.json
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" quote --holdings --write      # portfolio + targets tickers
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol AAPL --above 350
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol BAC --stop 50 --note "my stop"
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol KO --pct 3
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --opening-bell
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" check                         # exit 0 = something rang
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" clock --market br              # B3 aberta ou fechada, próxima abertura
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" clock --market us              # NYSE
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" quote PETR4 VALE3 --write      # -> trader/prices.json
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" quote --holdings --write       # tickers da carteira e dos alvos
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol PETR4 --above 42
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol VALE3 --stop 52 --note "meu stop"
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --symbol ITUB4 --pct 3
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" add --opening-bell --market br
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" check                          # código 0 = algo tocou
 python3 "${CLAUDE_SKILL_DIR}/alerts.py" list
-python3 "${CLAUDE_SKILL_DIR}/alerts.py" reset aapl-above-350
+python3 "${CLAUDE_SKILL_DIR}/alerts.py" reset petr4-above-42
 ```
 
-## What it reads and writes
+Sem `--market`, vale o `"market"` de `trader/config.json` (padrão `us`).
 
-| file | what |
+## O que lê e grava
+
+| arquivo | o quê |
 | --- | --- |
-| `trader/alerts.json` | the rules (`alerts.example.json` in this folder) |
-| `trader/state/alerts.json` | which rules rang and when, so each rings once |
-| `trader/prices.json` | the latest quotes, merged in, for trader-budget, trader-risk, trader-tax and trader-rebalance |
+| `trader/alerts.json` | as regras (`alerts.example.json` nesta pasta) |
+| `trader/state/alerts.json` | quais regras tocaram e quando, para cada uma tocar uma vez |
+| `trader/prices.json` | as últimas cotações, para trader-budget, trader-risk, trader-tax e trader-rebalance (tickers da B3 sem o `.SA`) |
 
-## Rule types
+## Tipos de regra
 
-| type | rings when | rings again |
+| tipo | toca quando | toca de novo |
 | --- | --- | --- |
-| `above` | price at or above `price` | after `reset`, or on its own if `"rearm": true` and the price fell back |
-| `below` / `stop` | price at or below `price` | same |
-| `pct_move` | moved `pct` percent from the previous close (or `ref`), optional `direction` up or down | once per day at most |
-| `opening_bell` | the NYSE is open | once per trading day |
+| `above` | preço igual ou acima de `price` | depois do `reset`, ou sozinho com `"rearm": true` quando o preço volta |
+| `below` / `stop` | preço igual ou abaixo de `price` | igual |
+| `pct_move` | variou `pct`% sobre o fechamento anterior (ou `ref`), `direction` up ou down opcional | no máximo uma vez por dia |
+| `opening_bell` | o mercado abriu (`"market": "br"` para a B3) | uma vez por pregão |
 
-## Quotes
+## Cotações
 
-- `yahoo` (default): `query1.finance.yahoo.com/v8/finance/chart/<TICKER>`, an
-  unofficial free JSON endpoint, one request per ticker, half a second apart.
-- `stooq`: `stooq.com/q/l/?s=aapl.us&f=sd2t2ohlcv&h&e=csv`, Stooq's free CSV.
-  It answered 404 when this was written (2026-10-13); the parser stays for
-  when it is back. Use `--source stooq` to try it.
-- Free quotes are delayed. They are fine for alerts and for checking sizes,
-  not for timing an order. The broker's price is the one that fills.
-- If both are down, read prices from the broker connector (Alpaca
-  `get_stock_snapshot`, IBKR `get_price_snapshot`) and write them into
-  `trader/prices.json` as `{"as_of": "...", "prices": {"AAPL": 341.27}}`.
+- **B3, brapi.dev** (padrão): `https://brapi.dev/api/v2/stocks/quote?symbols=PETR4`,
+  uma requisição por ticker. A chave vai na variável de ambiente
+  `BRAPI_TOKEN` e é enviada no cabeçalho `Authorization: Bearer`, nunca na URL
+  nem no chat. Sem chave, só os tickers de teste respondem (PETR4, VALE3,
+  ITUB4, MGLU3, MXRF11, HGLG11). O plano gratuito tem cerca de 15 mil
+  requisições por mês, uma por vez, cotação com uns 30 minutos de atraso; os
+  planos pagos liberam proventos, fundamentos e histórico longo. Ticker
+  renomeado (`changed`) é avisado.
+- **B3, Yahoo** (reserva automática se a brapi falhar): `PETR4.SA`.
+- **EUA, Yahoo** (padrão) e **Stooq** (`--source stooq`, fora do ar em 13/10/2026).
+- Cotação grátis tem atraso. Serve para alerta e para conferir tamanhos, não
+  para escolher o momento de uma ordem: o preço que executa é o da corretora.
 
-## The NYSE clock
+## Os relógios
 
-Regular session 9:30 a.m. to 4:00 p.m. New York time, closed on weekends and
-on these holidays, from nyse.com/markets/hours-calendars (read 2026-10-13):
+- **B3**, horário de Brasília: mercado à vista das 10h00 às **16h55** enquanto
+  os EUA estão no horário de verão e às **17h55** fora dele (a B3 ajusta a
+  grade quando Nova York muda o relógio e anuncia por ofício circular: 17h55
+  desde 03/11/2025, 16h55 desde 09/03/2026). A ferramenta supõe a volta para
+  17h55 depois do fim do horário de verão americano de 2026 (01/11); confirme
+  no ofício circular da B3 antes de depender do horário. Sem pregão em
+  2026: 1º/01, 16 e 17/02 (Carnaval), 03/04, 21/04, 01/05, 04/06, 07/09,
+  12/10, 02/11, 20/11, 24/12, 25/12 e 31/12; Quarta-feira de Cinzas (18/02) só
+  à tarde, a partir das 13h. 2027 está calculado pelos feriados nacionais e
+  marcado provisório até a B3 publicar.
+- **NYSE**, horário de Nova York: 9h30 às 16h00; feriados de 2026 e 2027 de
+  nyse.com, com fechamento às 13h00 no dia seguinte ao Thanksgiving e na
+  véspera de Natal. O horário de verão é calculado na ferramenta.
 
-- 2026: Jan 1, Jan 19, Feb 16, Apr 3 (Good Friday), May 25, Jun 19, Jul 3
-  (Independence Day observed), Sep 7, Nov 26, Dec 25. Early close 1:00 p.m. on
-  Nov 27 and Dec 24.
-- 2027: Jan 1, Jan 18, Feb 15, Mar 26 (Good Friday), May 31, Jun 18
-  (Juneteenth observed), Jul 5 (Independence Day observed), Sep 6, Nov 25,
-  Dec 24 (Christmas observed). Early close 1:00 p.m. on Nov 26.
+## Passos
 
-Daylight saving time is worked out in the tool, so it needs no time zone
-files. For any other year it says the holiday list is unknown.
+1. Pergunte o que acompanhar, nas palavras do usuário ("me avisa se a Vale
+   cair abaixo de R$ 52"), crie a regra e confirme: ticker, tipo, nível.
+2. Rode `check` agora e, se o usuário quiser, numa tarefa agendada (a cada
+   15 minutos no horário do pregão é suficiente). Cada rodada busca só os
+   tickers das regras e toca cada alerta uma vez.
+3. Conte o que tocou, uma linha cada. Para agir, mande para o dimensionamento
+   e o `/trader-risk`. Nunca aja pelo usuário.
 
-## Steps
+## O que ele nunca faz
 
-1. Ask what to watch, in the user's words ("tell me if Apple drops under
-   $320"), and add the rule. Confirm it back: ticker, type, level.
-2. Run `check` now, and on a schedule if the user wants (a Claude scheduled
-   task or cron, every 15 minutes in market hours is plenty). Each run fetches
-   only the tickers in the rules and rings each alert once.
-3. Tell the user what rang in one line each. If they want to act, send them
-   to sizing and `/trader-risk`. Never act for them.
+Nunca envia, cancela ou altera ordem, nunca diz que uma cotação é em tempo
+real e nunca prevê para onde o preço vai.
 
-## Example: the reel's portfolio
+## Segurança
 
-After the copy portfolio is bought, `add --opening-bell`, `add --symbol AAPL
---above 350`, and `add --symbol BAC --stop 50`. On 2026-10-13 AAPL closed at
-$341.27 and BAC at $53.96, so `check` that evening prints "Nothing hit" and
-exits 1. At 9:30 the next morning the opening bell rings once.
-
-## What it never does
-
-It never places, cancels or changes an order, never claims a quote is
-real time, and never predicts where a price is going.
-
-## Safety
-
-- Education and tooling, not financial advice. An alert is a fact about a price, not a signal to trade.
-- Paper trading by default (`"paper": true`). Going live is the user's own decision, in their own config.
-- Nothing in this pack places an order except trader-broker, and only when all three hold: trader-risk
-  passed that exact order today, the user typed an explicit yes for that one order in the chat, and the
-  user clicked Allow once on Claude's own card because the order tool is set to "Needs approval"
-  (Customize > Connectors > tool permissions). Never set an order tool to "Always allow".
-- No options, margin, short selling or leverage unless the config allows it and the user confirms.
-- Broker keys live in environment variables or the Claude Desktop config, never in the chat.
+- Educação e ferramenta, não recomendação de investimento (not financial
+  advice). Um alerta é um fato sobre um preço, não um sinal para operar.
+- B3: nenhuma skill envia ordem. Cada boleta só vai para o seu home broker
+  depois do `/trader-risk` e do seu "sim" no chat; quem digita é você.
+- EUA: só o `/trader-broker` leva a uma ordem, depois do `/trader-risk`, do seu
+  "yes" explícito e do clique em Allow once (ferramenta em "Needs approval",
+  nunca "Always allow"). Paper trading é o padrão (`"paper": true`).
+- Sem opções, margem, venda a descoberto ou alavancagem, a menos que o config
+  permita e você confirme.
+- Chaves (`BRAPI_TOKEN`, Alpaca) ficam em variáveis de ambiente ou no config do
+  Claude Desktop, nunca no chat.

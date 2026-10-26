@@ -7,12 +7,21 @@ from _load import ROOT
 
 SKILLS = ["trader-copycat", "trader-news", "trader-budget", "trader-pelosi", "trader-analyst",
           "trader-screener", "trader-risk", "trader-broker", "trader-tax", "trader-alerts",
-          "trader-rebalance"]
-ABOUT = ("11 Claude skills that copy the investors you trust, watch the news and Congress, size every "
-         "trade to your budget, and never place an order without your yes.")
+          "trader-rebalance", "trader-insiders"]
+ABOUT = ("12 skills do Claude para a B3 e para os EUA: copiam a carteira de fundos e gestores, acompanham "
+         "fatos relevantes, insiders e o Congresso americano, dimensionam cada boleta ao seu orçamento, "
+         "apuram o IR e nunca enviam uma ordem sem o seu sim.")
 # skills that can lead to an order carry the safety block
 ORDER_PATH = ["trader-copycat", "trader-budget", "trader-pelosi", "trader-risk", "trader-broker",
-              "trader-tax", "trader-alerts", "trader-rebalance"]
+              "trader-tax", "trader-alerts", "trader-rebalance", "trader-insiders"]
+# shared modules: one source, identical copies (tests/sync_b3.py writes them)
+SHARED = {("trader-budget", "b3.py"): ["trader-alerts", "trader-analyst", "trader-broker", "trader-copycat",
+                                       "trader-insiders", "trader-news", "trader-rebalance", "trader-risk",
+                                       "trader-tax"],
+          ("trader-budget", "b3_ativos.json"): ["trader-alerts", "trader-analyst", "trader-broker",
+                                                "trader-copycat", "trader-insiders", "trader-news",
+                                                "trader-rebalance", "trader-risk", "trader-tax"],
+          ("trader-copycat", "cvm.py"): ["trader-analyst", "trader-insiders", "trader-news"]}
 
 
 def frontmatter(path):
@@ -31,7 +40,7 @@ def every_text_file():
 
 
 class Repo(unittest.TestCase):
-    def test_eleven_skill_folders_at_the_root(self):
+    def test_twelve_skill_folders_at_the_root(self):
         found = sorted(d for d in os.listdir(ROOT)
                        if os.path.isfile(os.path.join(ROOT, d, "SKILL.md")))
         self.assertEqual(found, sorted(SKILLS))
@@ -52,8 +61,9 @@ class Repo(unittest.TestCase):
         for s in ORDER_PATH:
             _, text = frontmatter(os.path.join(ROOT, s, "SKILL.md"))
             low = " ".join(text.lower().split())
+            self.assertIn("não recomendação de investimento", low, s)
             self.assertIn("not financial advice", low, s)
-            self.assertIn("yes", low, s)
+            self.assertIn("\"sim\"", low, s)
 
     def test_plugin_manifest_points_at_the_root_skills(self):
         with open(os.path.join(ROOT, ".claude-plugin", "plugin.json")) as fh:
@@ -71,10 +81,11 @@ class Repo(unittest.TestCase):
             readme = " ".join(fh.read().split())
         self.assertTrue(readme.startswith("# The Trader skill"))
         for line in (ABOUT,
-                     "https://github.com/Jakeschincariol/trader-skill install skill",
-                     "/plugin marketplace add Jakeschincariol/trader-skill",
+                     "https://github.com/eHattori/trader-skill install skill",
+                     "/plugin marketplace add eHattori/trader-skill",
                      "/plugin install trader-skill@trader-skill",
-                     "## Fine print"):
+                     "Fork de [Jakeschincariol/trader-skill]",
+                     "## Letras miúdas"):
             self.assertIn(line, readme)
         for s in SKILLS:
             self.assertIn("/" + s, readme, s)
@@ -86,6 +97,21 @@ class Repo(unittest.TestCase):
             rel = os.path.relpath(path, ROOT)
             self.assertNotIn("\u2014", text, rel)
             self.assertNotIn("jakeschincariol" + "@" + "gmail.com", text, rel)  # built, so this file passes too
+
+    def test_shared_modules_are_identical(self):
+        for (src_dir, name), users in SHARED.items():
+            with open(os.path.join(ROOT, src_dir, name), "rb") as fh:
+                src = fh.read()
+            for u in users:
+                with open(os.path.join(ROOT, u, name), "rb") as fh:
+                    self.assertEqual(fh.read(), src, "%s/%s differs from %s: run tests/sync_b3.py" % (u, name, src_dir))
+
+    def test_br_config_example(self):
+        with open(os.path.join(ROOT, "trader-budget", "config_br.example.json"), encoding="utf-8") as fh:
+            cfg = json.load(fh)
+        self.assertEqual(cfg["market"], "br")
+        self.assertIs(cfg["allow_options"], False)
+        self.assertIs(cfg["allow_short"], False)
 
     def test_paper_trading_is_the_default(self):
         with open(os.path.join(ROOT, "trader-budget", "config.example.json")) as fh:

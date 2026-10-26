@@ -11,7 +11,10 @@ each one passes or fails, and ranks the ones that pass.
 Metrics: a JSON file ({"companies": [...]} as trader-analyst's facts.py
 --metrics writes it, or a plain list of objects) or a CSV with a header row.
 Each company needs a "ticker"; every other column is a metric. Numbers in a
-CSV can carry $, % and thousands commas.
+CSV can carry $, R$, % and thousands commas, or the Brazilian format 1.234,56.
+Brazilian companies: trader-analyst's demonstracoes.py --metrics writes the
+same file from the CVM (ITR/DFP), with BRL amounts; prices.json uses PETR4
+style tickers, so pe and earnings_yield work the same way.
 
 Prices (optional): trader/prices.json ({"prices": {"AAPL": 341.27}}). With
 prices, the screener adds:
@@ -39,6 +42,7 @@ import argparse
 import csv
 import json
 import os
+import re
 import sys
 
 OPS = (">", ">=", "<", "<=", "==", "!=", "between", "in", "not in")
@@ -58,7 +62,13 @@ def to_number(v):
     s = str(v).strip()
     if s == "" or s.lower() in ("na", "n/a", "none", "null", "-"):
         return None
-    t = s.replace(",", "").replace("$", "").replace("%", "")
+    brl = "R$" in s
+    usd = "$" in s and not brl
+    t = s.replace("R$", "").replace("$", "").replace("%", "").replace(" ", "")
+    if not usd and (brl or re.match(r"^-?\d{1,3}(\.\d{3})+,\d+$", t) or re.match(r"^-?\d+,\d{1,2}$", t)):
+        t = t.replace(".", "").replace(",", ".")   # formato brasileiro: 1.234,56 ou 21,7
+    else:
+        t = t.replace(",", "")
     try:
         return float(t)
     except ValueError:

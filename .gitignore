@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+# dados locais de cada projeto (carteira, cache da CVM, estado)
+trader/

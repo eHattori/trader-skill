@@ -1,99 +1,92 @@
 ---
 name: trader-pelosi
 description: >-
-  The Pelosi Tracker. Watches the stock trades members of Congress must
-  disclose under the STOCK Act: reads the House Clerk's public Periodic
-  Transaction Reports (PTRs) as soon as they are posted, alerts once per new
-  filing, and turns each PDF into clean rows (who, owner, stock, ticker,
-  buy or sell, options strike and expiry, trade date, amount range, how many
-  days it took to disclose). Flags trades in stocks you hold. Senate reports
-  are covered by a documented manual route. Use when the user says "what is
-  Pelosi buying", "track Nancy Pelosi", "Congress trades", "politician stock
-  trades", "did any congressman buy X", "alert me when Pelosi files", or
-  "run the Pelosi skill".
-argument-hint: "[member name] [--read]"
+  O Rastreador do Congresso americano. Acompanha as negociações de ações que
+  os membros do Congresso dos EUA são obrigados a divulgar pelo STOCK Act: lê
+  os Periodic Transaction Reports (PTRs) da Câmara assim que são publicados,
+  avisa uma vez por documento novo e transforma cada PDF em linhas limpas
+  (quem, titular, ativo, ticker, compra ou venda, strike e vencimento de
+  opções, data, faixa de valor, dias até divulgar). Marca negócios em ações
+  que você tem. O Senado tem uma rota manual documentada. Use quando o
+  usuário disser "o que a Pelosi está comprando", "trades do Congresso",
+  "Nancy Pelosi", "deputado americano comprou X", "me avise quando a Pelosi
+  divulgar". Para insiders de empresas brasileiras, use /trader-insiders.
+argument-hint: "[nome do membro] [--read]"
 ---
 
 # trader-pelosi
 
-Members of Congress have to report their trades, their spouse's and their
-dependent children's. The House Clerk posts every report as a PDF and lists
-them all in one index file per year. This skill reads that index, notices the
-moment a new report appears, and reads the report for you.
+Membros do Congresso americano precisam informar as negociações deles, do
+cônjuge e dos filhos dependentes. A Câmara publica cada relatório em PDF e
+lista todos num índice por ano. Esta skill lê o índice, percebe na hora
+quando um relatório novo aparece e lê o relatório para você.
 
-It is fast. It is not early. A PTR is due within 30 days of the member
-learning of the trade and never more than 45 days after it, so by the time
-anyone can read it the trade is days or weeks old. There is no inside
-information here: only public filings, read quickly. Say that every time.
+É rápido, não é antecipado. O PTR vence 30 dias depois de o membro saber do
+negócio e nunca mais de 45 dias depois dele, então quando alguém consegue ler
+o negócio já tem dias ou semanas. Não há informação privilegiada aqui: só
+documentos públicos, lidos depressa. Diga isso sempre.
 
-Tool in this folder (standard library Python; `pdftotext` from poppler is
-optional, to read the PDFs locally):
+Equivalente brasileiro: `/trader-insiders` (controladores e administradores
+de companhias da B3, pela CVM). Não existe divulgação parecida para
+parlamentares brasileiros.
+
+`${CLAUDE_SKILL_DIR}` é a pasta desta skill. Ferramenta em Python padrão
+(`pdftotext`, do poppler, é opcional, para ler os PDFs localmente):
 
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/ptr.py" --help
-```
-
-## What it reads and writes
-
-- Reads `https://disclosures-clerk.house.gov/public_disc/financial-pdfs/<YEAR>FD.zip`
-  (one `<Member>` per filing: name, district, FilingType, FilingDate, DocID)
-  and each PTR at `.../public_disc/ptr-pdfs/<YEAR>/<DocID>.pdf`.
-- Writes `trader/state/pelosi.json` (the DocIDs already shown, so each PTR
-  alerts once) and keeps downloaded PDFs in `trader/state/ptr-pdfs/`.
-- Reads `trader/portfolio.json` (if it exists) to flag trades in what you hold.
-
-## The rules
-
-- **Quote the filing, not a tracker.** Every row comes from the PTR PDF on the
-  Clerk's site, with its DocID and link. Third-party trackers are fine for
-  browsing but can be off (Capitol Trades showed Pelosi's trade dates one day
-  earlier than her PTRs). The PTR wins.
-- **Amounts are ranges.** "$1,000,001 - $5,000,000", never "$3 million".
-- **Owner matters.** SP is the spouse, JT joint, DC a dependent child, blank
-  the member. Pelosi's 2026 trades are all SP: Paul Pelosi.
-- **Say the delay.** Each row shows how many days passed between the trade
-  and the filing; over 45 is flagged as late.
-- **Options are options.** A call bought with a strike and an expiry is not
-  a share purchase. The tool reads contracts, strike and expiry from the
-  description and marks exercises.
-
-## Step 1: what has been filed
-
-```bash
 python3 "${CLAUDE_SKILL_DIR}/ptr.py" index --member pelosi
-python3 "${CLAUDE_SKILL_DIR}/ptr.py" index --since 2026-10-01        # every member
+python3 "${CLAUDE_SKILL_DIR}/ptr.py" index --since 2026-10-01        # todos os membros
 python3 "${CLAUDE_SKILL_DIR}/ptr.py" index --member "Josh Gottheimer" --year 2025
-```
-
-`--member` takes a last name, "First Last" or "Last, First", and repeats.
-`--type ''` lists every filing type (annual reports are type O).
-
-## Step 2: watch for new ones
-
-```bash
-python3 "${CLAUDE_SKILL_DIR}/ptr.py" new --member pelosi --read
-```
-
-Shows only PTRs not seen at the last check (the first run shows the last 45
-days), downloads and reads them with `--read`, and records them in the state
-file. Exit code 1 means nothing new. In January it also checks last year's
-index. The Clerk rebuilds the index file about once a day (the copy read on
-2026-10-13 was stamped 09:00 that morning), so checking every hour on weekdays
-is plenty: run it with `/loop 1h` or a scheduled task.
-
-## Step 3: read a report
-
-```bash
+python3 "${CLAUDE_SKILL_DIR}/ptr.py" new --member pelosi --read      # só os novos, lidos
 python3 "${CLAUDE_SKILL_DIR}/ptr.py" fetch 20035143
 python3 "${CLAUDE_SKILL_DIR}/ptr.py" parse ptr.txt --filed 2026-08-21 --json
 ```
 
-`fetch` saves the PDF and, if `pdftotext` is installed, prints the rows. If it
-is not installed, open the saved PDF and read it directly: you can read PDFs.
-`parse` turns `pdftotext -layout` text into rows. Check the row count against
-the PDF when a report runs over several pages.
+## O que lê e grava
 
-## Example: the reel's alert
+- `https://disclosures-clerk.house.gov/public_disc/financial-pdfs/<ANO>FD.zip`
+  (um registro por documento: nome, distrito, tipo, data, DocID) e cada PTR em
+  `.../public_disc/ptr-pdfs/<ANO>/<DocID>.pdf`.
+- Grava `trader/state/pelosi.json` (DocIDs já mostrados) e guarda os PDFs em
+  `trader/state/ptr-pdfs/`.
+- Lê `trader/portfolio.json` para marcar negócios em ações que você tem.
+
+## As regras
+
+- **Cite o documento, não um rastreador.** Toda linha vem do PDF da Câmara,
+  com DocID e link. O Capitol Trades mostrou as datas da Pelosi um dia antes
+  das dos PTRs: o PTR vale.
+- **Valores são faixas.** "US$ 1.000.001 a US$ 5.000.000", nunca "US$ 3 milhões".
+- **Titular importa.** SP é o cônjuge, JT conjunto, DC filho dependente, vazio
+  é o próprio membro. Os negócios de 2026 da Pelosi são todos SP (Paul Pelosi).
+- **Diga a defasagem.** Cada linha mostra os dias entre o negócio e a
+  divulgação; acima de 45 é marcado como atrasado.
+- **Opção é opção.** Uma call com strike e vencimento não é compra de ações.
+
+## Passos
+
+1. `index` para ver o que já foi entregue (`--member` aceita sobrenome, "Nome
+   Sobrenome" ou "Sobrenome, Nome"; `--type ''` lista todos os tipos).
+2. `new --member pelosi --read` mostra só os PTRs ainda não vistos (na
+   primeira vez, os últimos 45 dias), baixa e lê. Código 1 = nada novo. Em
+   janeiro também olha o índice do ano anterior. A Câmara refaz o índice
+   cerca de uma vez por dia: checar de hora em hora em dias úteis basta.
+3. `fetch` salva o PDF e, com `pdftotext`, imprime as linhas; sem ele, abra o
+   PDF salvo e leia. `parse` transforma o texto de `pdftotext -layout` em
+   linhas. Confira o número de linhas contra o PDF em relatórios longos.
+
+## O Senado: a rota manual
+
+Os relatórios ficam em `https://efdsearch.senate.gov`. Antes de buscar, o
+site pede que se marque a concordância com os limites legais de uso. Essa
+concordância é da pessoa, então esta skill não clica nem automatiza. O
+usuário abre `https://efdsearch.senate.gov/search/`, aceita, escolhe "Periodic
+Transactions", digita o sobrenome, define as datas, abre o relatório e cola a
+tabela (ou uma captura) no chat; você escreve no mesmo formato das linhas da
+Câmara, com o link e o mesmo aviso de 45 dias.
+
+## Exemplo
 
 ```
 NEW Periodic Transaction Report: Hon. Nancy Pelosi (CA11) filed 2026-08-21, doc 20035143
@@ -102,55 +95,34 @@ NEW Periodic Transaction Report: Hon. Nancy Pelosi (CA11) filed 2026-08-21, doc 
     2026-07-24, disclosed 28 days later
 ```
 
-The same PTR also shows 10,000 and 5,000 BE shares, a second block of 100 BE
-calls on 07/28, Intel shares and 50 Intel calls ($50 strike, 6/17/27), and a
-private real estate LLC with no ticker. Her other 2026 PTRs: 20033725
-(01/23), 20034836 (06/23, Intel and Uber calls) and 20035553 (10/02, a real
-estate LLC). Then: "This is a public disclosure filed 28 days after the trade.
-It says what Paul Pelosi bought in July, not what anyone will buy next."
+O mesmo PTR mostra 10.000 e 5.000 ações BE, um segundo bloco de 100 calls BE
+em 28/07, ações da Intel e 50 calls da Intel (strike US$ 50, 17/06/27) e uma
+LLC imobiliária sem ticker. Depois: "É uma divulgação pública feita 28 dias
+depois do negócio. Diz o que Paul Pelosi comprou em julho, não o que alguém
+vai comprar."
 
-If the user wants to act on it, it goes the long way: shares only (the config
-has `allow_options: false`), sized by `/trader-budget`, checked by
-`/trader-risk`, placed by `/trader-broker` only after their yes.
+Para agir, o caminho é o longo: só ações (o config tem `allow_options:
+false`), dimensionadas pelo `/trader-budget`, conferidas pelo `/trader-risk`
+e enviadas pelo `/trader-broker` só depois do sim do usuário.
 
-## The Senate: the manual route
+## O que ele nunca faz
 
-Senate reports live at `https://efdsearch.senate.gov`. Before searching, the
-site asks you to tick a box agreeing to the legal limits on how the reports
-may be used. That is an agreement for the person to accept, so this skill
-does not click it or automate it. The route:
+- Nunca diz ou insinua que um membro tem informação privilegiada, nem que
+  copiar um político bate o mercado. Sem promessa de retorno.
+- Nunca apresenta faixa como valor exato, nem a data de um rastreador como data do negócio.
+- Nunca envia ordem e nunca copia operações com opções.
+- Nunca automatiza a concordância do Senado nem qualquer login.
 
-1. The user opens `https://efdsearch.senate.gov/search/` in their browser and
-   accepts the agreement themselves.
-2. They pick the report type "Periodic Transactions", type the senator's last
-   name, set the date range and search.
-3. They open the report: electronic filings show a table of transactions,
-   paper filings are scanned images.
-4. They paste the table (or a screenshot, or the saved page) into the chat,
-   and you write it up in the same shape as the House rows, with the report
-   link, and the same 45-day caveat.
+## Segurança
 
-## What it never does
-
-- Never says or implies a member has inside information, or that copying a
-  politician beats the market. No return claims.
-- Never presents a range as an exact dollar figure or a tracker's date as the
-  trade date.
-- Never places an order, and never copies options trades.
-- Never automates the Senate agreement or any login.
-
-## Safety
-
-- Education and tooling, not financial advice. Nothing in this pack is a
-  recommendation to buy or sell anything.
-- Paper trading by default (`"paper": true` in `trader/config.json`).
-- Nothing places an order except `/trader-broker`, and only after
-  `/trader-risk` passes AND the user types an explicit yes for that order in
-  the chat, AND the brokerage tool is set to "Needs approval" in Claude
-  (Customize > Connectors > tool permissions) so Claude's own "Allow once /
-  Deny" card appears too. Never "Always allow" an order tool.
-- No options, margin, shorting or leverage unless the config allows it and
-  the user confirms.
-- Congressional trades are PUBLIC disclosures filed up to 45 days after the
-  trade (STOCK Act). This skill reads them fast; it has no inside
-  information, and it says so.
+- Educação e ferramenta, não recomendação de investimento (not financial advice).
+- Nada neste pacote envia ordem, exceto o `/trader-broker` (EUA), e só depois
+  que o `/trader-risk` aprovou aquela ordem, você disse um "yes" explícito
+  para ela no chat e clicou em Allow once no cartão do Claude (ferramenta da
+  corretora em "Needs approval", nunca "Always allow"). Na B3, você mesmo
+  digita cada boleta no home broker depois do seu "sim".
+- Paper trading é o padrão (`"paper": true`).
+- Sem opções, margem, venda a descoberto ou alavancagem, a menos que o config
+  permita e você confirme.
+- Os negócios do Congresso são divulgações PÚBLICAS feitas até 45 dias depois
+  (STOCK Act). Esta skill lê depressa; não tem informação privilegiada, e diz isso.

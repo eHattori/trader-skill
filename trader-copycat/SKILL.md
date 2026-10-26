@@ -1,166 +1,138 @@
 ---
 name: trader-copycat
 description: >-
-  The Reverse Engineer. Reads a famous investor's public SEC filings (the
-  quarterly 13F-HR, plus Form 4 if you want the insider trades) and rebuilds
-  their portfolio as weights you can copy: every position, its share of the
-  fund, what they bought, added, trimmed and sold since the last quarter, with
-  tickers matched to every CUSIP. Then it writes trader/targets.json so the
-  budget skill can size it to your money. Use when the user says "copy
-  Buffett", "copy Berkshire", "what does Ackman own", "reverse engineer this
-  investor", "show me their 13F", "what did they buy last quarter", "copy the
-  top 5", or names any fund or famous investor.
-argument-hint: "[investor, fund or CIK] [--top N]"
+  O Engenheiro Reverso. Reconstrói a carteira de um gestor a partir do que ele
+  é obrigado a mostrar e escreve pesos para copiar em trader/targets.json. No
+  Brasil, lê a CDA mensal da CVM (Composição e Diversificação das Aplicações)
+  de qualquer fundo: ações, units, FIIs, ETFs e BDRs no fim do mês, seguindo o
+  FIC até o fundo master, com as posições em sigilo e o que mudou contra o mês
+  anterior. Nos EUA, lê o 13F-HR trimestral na SEC (Berkshire, Pershing Square
+  e outros). Use quando o usuário disser "copiar a carteira da Dynamo", "o que
+  o fundo Verde tem", "carteira do SPX Falcon", "copiar o top 5 de um fundo",
+  "o que o fundo comprou no mês", "copy Buffett", "copy Berkshire", "13F",
+  ou citar qualquer fundo ou gestor.
+argument-hint: "[fundo, gestor, CNPJ ou CIK] [--top N]"
 ---
 
 # trader-copycat
 
-Copying an investor starts with what they are legally required to show: a
-13F-HR, filed with the SEC every quarter by any investment manager with over
-$100 million in US-listed stocks and other 13(f) securities. This skill reads
-it straight from SEC EDGAR, rebuilds the portfolio, and turns it into target
-weights for your own account.
+Copiar um gestor começa pelo que a lei obriga ele a mostrar. No Brasil, todo
+fundo entrega à CVM, todo mês, a carteira do último dia útil (a CDA). Nos EUA,
+todo gestor com mais de US$ 100 milhões em ações americanas entrega o 13F-HR
+todo trimestre. Esta skill lê o documento oficial, reconstrói a carteira e
+transforma em pesos para a sua conta.
 
-Tool in this folder (standard library Python, no keys):
+`${CLAUDE_SKILL_DIR}` é a pasta desta skill (onde está este SKILL.md).
+
+## Qual mercado
+
+- Fundo brasileiro (CNPJ, "FIA", "FIC", gestora brasileira): **CDA da CVM**, `fundos.py`.
+- Gestor americano (Berkshire, Ackman, Burry, CIK): **13F da SEC**, `edgar13f.py`.
+- Use uma pasta de projeto por mercado: o `trader/config.json` de cada uma
+  tem `"market": "br"` ou `"us"`, e cada skill segue esse valor.
+
+## Brasil: CDA da CVM
 
 ```bash
-python3 "${CLAUDE_SKILL_DIR}/edgar13f.py" --help
+python3 "${CLAUDE_SKILL_DIR}/fundos.py" busca "dynamo cougar"        # nome -> CNPJ e PL, mês mais recente
+python3 "${CLAUDE_SKILL_DIR}/fundos.py" meses                        # meses já publicados
+python3 "${CLAUDE_SKILL_DIR}/fundos.py" carteira <CNPJ> --top 15     # posições no fim do mês
+python3 "${CLAUDE_SKILL_DIR}/fundos.py" diff <CNPJ>                  # contra o mês anterior
+python3 "${CLAUDE_SKILL_DIR}/fundos.py" copiar <CNPJ> --top 5 --out trader/targets.json
+python3 "${CLAUDE_SKILL_DIR}/fundos.py" colunas                      # cabeçalhos dos CSVs, se algo quebrar
 ```
 
-SEC asks every program to identify itself with a name and email. Set it once
-in `trader/config.json` (`"sec_user_agent": "Your Name you@example.com"`, with
-the user's real name and email) or `export SEC_USER_AGENT=...`. The tool
-refuses to call SEC without it and says how to fix it. Ask the user for it;
-never invent one.
+`gestoras.json` nesta pasta lista nomes de fundos de ações conhecidos para a
+busca. Ele não traz CNPJs: o CNPJ sempre vem da própria CDA, pela `busca`.
+Mostre os resultados e deixe o usuário escolher a classe certa: um mesmo
+gestor costuma ter FIC, master, previdência e classes para investidor
+qualificado.
 
-## What it writes
+O arquivo é https://dados.cvm.gov.br/dados/FI/DOC/CDA/DADOS/cda_fi_AAAAMM.zip,
+com algumas centenas de MB, baixado uma vez e guardado em `trader/cache/cvm/`.
 
-- `trader/targets.json`: the weights to copy, in the shape every other trader
-  skill reads: `{ "source", "as_of", "weights": [ {"ticker", "name",
-  "weight"} ] }`, weights in % with 2 decimals summing to 100 over the stock
-  sleeve (keep the 2 decimals: budget sizing needs them), plus the
-  13F share, value, CUSIPs, what was skipped and why, and the caveats.
-- `trader/tickers.json` (optional, yours): CUSIP to ticker fixes the tool
-  will always use first, as `{"650111107": "NYT"}`.
+### As regras (Brasil)
 
-`targets.example.json` in this folder is the real output of the reel's run
-(Berkshire, top 5).
+- **Diga a data, sempre.** "Carteira de 30/09/2026, publicada pela CVM em outubro."
+  A CDA é a foto do último dia do mês, não a carteira de hoje.
+- **Sigilo.** O fundo pode esconder posições por até 90 dias (mais, com
+  autorização da CVM). Elas aparecem só como um total no arquivo CONFID; a
+  ferramenta mostra quanto é. Uma posição que "sumiu" pode ter entrado em
+  sigilo, e não sido vendida.
+- **FIC e master.** Quase todo fundo de varejo é um FIC que investe num
+  master. Com o padrão (`--seguir-master` implícito) a ferramenta segue até o
+  master e avisa. `--sem-master` desliga.
+- **Só a ponta comprada à vista.** Opções, futuros, termo, swap e ações
+  tomadas em aluguel ficam fora; ações cedidas em aluguel continuam do fundo
+  e entram. A ferramenta mostra quanto ficou fora.
+- **O fundo, não a pessoa.** Diga "o fundo tinha", nunca "o gestor comprou".
 
-## The rules
-
-- **Say how old the data is, every time.** A 13F is a snapshot of the last
-  day of the quarter, filed up to 45 days later. Say "holdings as of
-  2026-06-30, filed 2026-08-14" in every answer that uses one.
-- **Say what it cannot show.** Long US-listed positions only: no shorts, no
-  cash, no bonds, no foreign shares, no private companies, nothing bought and
-  sold inside the quarter, and no prices paid.
-- **The firm, not the person.** Berkshire Hathaway files the 13F, not Warren
-  Buffett. Greg Abel has been CEO since 2026-01-01 and Buffett became
-  Chairman Emeritus on 2026-09-18. Never say "Buffett bought" when the filing
-  only says "Berkshire held".
-- **Every number comes from the filing.** Quote the accession number and link
-  the information table. If a ticker is a guess (marked `*`), say so and fix
-  it with `--figi` or `trader/tickers.json` before anything is copied.
-- **Options and bonds are never copied.** PUT, CALL and PRN rows are listed as
-  excluded. This pack trades stocks only unless the config allows more.
-
-## Step 1: find the investor
+## EUA: 13F na SEC
 
 ```bash
 python3 "${CLAUDE_SKILL_DIR}/edgar13f.py" find buffett
-python3 "${CLAUDE_SKILL_DIR}/edgar13f.py" find "pershing square" --sec
-```
-
-`filers.json` lists 23 well-known filers with CIKs checked against SEC on
-2026-10-13 (Berkshire, Pershing Square, Scion, Bridgewater, ARK, Duquesne,
-Appaloosa, Baupost and more). `--sec` searches every EDGAR filer by name. If
-a filer has stopped filing (Scion's last 13F-HR was 2025-11-03), say so.
-
-## Step 2: read the latest quarter
-
-```bash
 python3 "${CLAUDE_SKILL_DIR}/edgar13f.py" filings 1067983
 python3 "${CLAUDE_SKILL_DIR}/edgar13f.py" holdings 1067983 --combine --top 15
-```
-
-It downloads the submissions list, picks the newest original 13F-HR, finds the
-information table XML in the filing folder, sums the rows each holding is
-split into (Berkshire reports one stock across several subsidiaries), checks
-the total against the cover page, and matches tickers: your
-`trader/tickers.json` first, then `share_classes.json` (verified CUSIPs for
-companies with several listed classes), then SEC's `company_tickers.json` by
-name, and OpenFIGI's free CUSIP lookup with `--figi`. `--combine` adds share
-classes of one company together (Alphabet A + C). If an amendment exists for
-the quarter, the tool says so; read it with `--accession`.
-
-## Step 3: what changed
-
-```bash
 python3 "${CLAUDE_SKILL_DIR}/edgar13f.py" diff 1067983
-```
-
-New positions, positions sold out, added and trimmed, by share count against
-the quarter before. Share counts at two dates, not trades: say "held more
-shares at June 30 than at March 31", never "bought on" a day.
-
-## Step 4: write the targets
-
-```bash
 python3 "${CLAUDE_SKILL_DIR}/edgar13f.py" copy 1067983 --top 5 --out trader/targets.json
 ```
 
-Share classes are combined by default (`--separate` keeps them apart).
-`--exclude TICKER` leaves out what the user will not own, `--min-pct 1` drops
-crumbs. The weights are each position's % of the 13F scaled so the chosen
-ones sum to 100. Show the table, then hand off to `/trader-budget`.
+A SEC pede que todo programa se identifique: `"sec_user_agent": "Seu Nome
+voce@exemplo.com"` em `trader/config.json` (ou `SEC_USER_AGENT`), com o nome
+e o e-mail reais do usuário. Pergunte; nunca invente. `filers.json` lista 23
+gestores conhecidos com CIK conferido na SEC.
 
-Form 4 (optional): insiders and 10% owners report their trades within two
-business days on Form 4. To see them, open
-`https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK=<CIK>&type=4&owner=include`
-(or the filer's submissions list) and read the filings the user asks about.
-They are faster than a 13F but cover one stock at a time.
+Regras do 13F: é a foto do fim do trimestre, entregue até 45 dias depois; só
+ações americanas compradas (sem vendidos, caixa, bonds ou ações fora dos
+EUA); Berkshire Hathaway entrega o 13F, não Warren Buffett (Greg Abel é CEO
+desde 01/01/2026); opções e bonds (PUT, CALL, PRN) nunca são copiados; um
+ticker com `*` é palpite e precisa de conferência (`--figi` ou
+`trader/tickers.json`) antes de copiar.
 
-## Example: the reel
+## O que ele grava
 
-"Copy Berkshire Hathaway, top 5." The latest 13F-HR is for the quarter ending
-2026-06-30, filed 2026-08-14, accession 0001193125-26-352200, total
-$299,253,556,246 (matches the cover page).
+`trader/targets.json`, no formato que todas as skills leem:
+`{"source", "market", "as_of", "weights": [{"ticker", "name", "weight"}], "caveats"}`,
+pesos em % com 2 casas somando 100. Guarde as 2 casas: o dimensionamento usa.
+`targets.example.json` aqui é uma rodada real do 13F da Berkshire (top 5).
 
-| # | holding | % of the 13F | copy weight |
-| --- | --- | --- | --- |
-| 1 | Apple (AAPL) | 22.04 | 30.67 |
-| 2 | American Express (AXP) | 17.14 | 23.85 |
-| 3 | Alphabet (GOOGL + GOOG combined) | 12.62 | 17.56 |
-| 4 | Coca-Cola (KO) | 10.86 | 15.11 |
-| 5 | Bank of America (BAC) | 9.20 | 12.80 |
+## Passos
 
-Rounded, that is 30.7 / 23.9 / 17.6 / 15.1 / 12.8. Since the quarter before:
-new D.R. Horton (3,564 shares), sold out of Constellation Brands, added
-Alphabet, Delta, Lennar, Macy's and the New York Times, trimmed Bank of
-America, Kroger, Capital One, Nucor, Ally and DaVita. Then: "These are
-Berkshire's holdings as of June 30, 2026. Next, /trader-budget sizes them to
-your $5,000."
+1. Ache o fundo (`busca` ou `find`) e confirme com o usuário qual é.
+2. Mostre a carteira (`carteira` ou `holdings`) com a data, o PL, o que está
+   em sigilo ou fora da cópia.
+3. Mostre o que mudou (`diff`), em quantidades em duas datas: "tinha mais
+   ações em 30/09 do que em 31/08", nunca "comprou no dia".
+4. Grave os pesos (`copiar` ou `copy`) com o `--top` e as exclusões que o
+   usuário quiser, e passe para `/trader-budget`.
 
-## What it never does
+## Exemplo
 
-- Never claims the investor is still holding today, or why they bought.
-- Never claims returns, or that copying a fund will make money. A 13F copy
-  buys months after the fund did, at today's price.
-- Never places an order. It writes target weights; sizing, risk checks and
-  your yes come after.
-- Never scrapes past SEC's fair-access limits (10 requests a second; the tool
-  stays well under).
+Com os dados fictícios dos testes (`tests/fixtures/trader-copycat-br`):
+"copiar o top 3 de um fundo de ações". A `busca` acha o FIC e o master; a
+`carteira` do FIC mostra que 98% do patrimônio está em cotas do master e
+segue para ele: PETR4 51%, VALE3 32%, TAEE11 12%, EGIE3 5% dos ativos da B3,
+mais R$ 120 mil em sigilo. `copiar --top 3` grava PETR4 53,93%, VALE3 33,71%,
+TAEE11 12,36%, e a resposta termina com: "Carteira de 30/09/2026. A seguir, o
+/trader-budget dimensiona para o seu orçamento."
 
-## Safety
+## O que ele nunca faz
 
-- Education and tooling, not financial advice. Nothing in this pack is a
-  recommendation to buy or sell anything.
-- Paper trading by default (`"paper": true` in `trader/config.json`).
-- Nothing places an order except `/trader-broker`, and only after
-  `/trader-risk` passes AND the user types an explicit yes for that order in
-  the chat, AND the brokerage tool is set to "Needs approval" in Claude
-  (Customize > Connectors > tool permissions) so Claude's own "Allow once /
-  Deny" card appears too. Never "Always allow" an order tool.
-- No options, margin, shorting or leverage unless the config allows it and
-  the user confirms.
-- 13F data is quarterly and up to 45 days old when it is filed. Say so.
+- Nunca diz que o fundo ainda tem a posição hoje, nem por que comprou.
+- Nunca promete retorno. Copiar compra meses depois do fundo, ao preço de hoje.
+- Nunca envia ordem: grava pesos; dimensionamento, risco e o seu sim vêm depois.
+- Nunca passa dos limites de acesso: a SEC pede no máximo 10 requisições por
+  segundo, e a CVM é baixada uma vez por mês e guardada em cache.
+
+## Segurança
+
+- Educação e ferramenta, não recomendação de investimento (not financial advice).
+- B3: nenhuma skill deste pacote envia ordem. Cada boleta só chega ao seu home
+  broker depois que o `/trader-risk` aprovou aquela boleta hoje e você disse
+  "sim" a ela no chat; quem digita e envia é você.
+- EUA: só o `/trader-broker` leva a uma ordem, depois do `/trader-risk`, do seu
+  "yes" explícito e do clique em Allow once (ferramenta da corretora em "Needs
+  approval", nunca "Always allow"). Paper trading é o padrão (`"paper": true`).
+- Sem opções, margem, venda a descoberto ou alavancagem, a menos que o config
+  permita e você confirme.
+- A CDA é mensal e o 13F é trimestral, ambos com semanas de atraso. Diga isso.

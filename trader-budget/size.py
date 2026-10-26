@@ -41,6 +41,9 @@ import math
 import os
 import sys
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import b3  # noqa: E402  (regras da B3: lote padrão, fracionário, R$)
+
 DEFAULTS = {
     "budget": None,
     "cash_buffer_pct": 10,
@@ -52,6 +55,8 @@ DEFAULTS = {
     "paper": True,
     "blocked": [],
     "allow_options": False,
+    "market": None,            # "br" (B3) ou "us"; sem valor, deduzido dos tickers
+    "limit_buffer_pct": 0.5,   # B3: preço limite = cotação + 0,5% (ordem limitada)
 }
 EPS = 1e-9
 
@@ -255,21 +260,65 @@ def whole_shares(dollars, prices, order, cap, money):
     return shares
 
 
-def size(rows, cfg, budget=None, prices=None, whole=None, cents=False, top=None):
+def detect_market(rows, cfg, forced=None):
+    """'br' quando o config diz ou todos os tickers são da B3; 'us' caso contrário.
+
+    Misturar B3 e EUA numa mesma rodada não é permitido: são moedas, lotes e
+    corretoras diferentes. Use uma pasta de projeto para cada mercado."""
+    m = forced or cfg.get("market")
+    kinds = {b3.market_of(r["ticker"]) for r in rows}
+    if m:
+        m = str(m).lower()
+        if m not in ("br", "us"):
+            raise SizeError("market must be \"br\" or \"us\", got %r" % m)
+        other = kinds - {m}
+        if other:
+            bad = [r["ticker"] for r in rows if b3.market_of(r["ticker"]) != m]
+            raise SizeError("market is %s but these tickers are not: %s (one market per project folder)"
+                            % (m, ", ".join(bad)))
+        return m
+    if len(kinds) > 1:
+        raise SizeError("the weights mix B3 and US tickers; set \"market\" in trader/config.json "
+                        "and keep one market per project folder")
+    return kinds.pop() if kinds else "us"
+
+
+def min_max_order(cfg, market):
+    """Order limits in the market's currency: min_order/max_order, or the *_brl / *_usd keys."""
+    suf = "brl" if market == "br" else "usd"
+    lo = cfg.get("min_order", cfg.get("min_order_" + suf))
+    hi = cfg.get("max_order", cfg.get("max_order_" + suf))
+    if lo is None:
+        lo = 50 if market == "br" else 5
+    return float(lo or 0), (float(hi) if hi is not None else None)
+
+
+def size(rows, cfg, budget=None, prices=None, whole=None, cents=False, top=None, market=None):
     """Pure function: weights + rules -> the full sizing result (a dict)."""
     budget = float(budget if budget is not None else (cfg.get("budget") or 0))
     if budget <= 0:
         raise SizeError("no budget: pass --budget or set \"budget\" in trader/config.json")
+    market = detect_market(rows, cfg, market)
     buf_pct = float(cfg.get("cash_buffer_pct", 10))
     cap_pct = float(cfg.get("max_position_pct", 25))
-    min_order = float(cfg.get("min_order_usd", 5) or 0)
+    min_order, _ = min_max_order(cfg, market)
     if not 0 <= buf_pct < 100:
         raise SizeError("cash_buffer_pct must be between 0 and 100")
     if not 0 < cap_pct <= 100:
         raise SizeError("max_position_pct must be above 0 and at most 100")
     if whole is None:
         whole = not cfg.get("fractional", True)
-    prices = prices or {}
+    prices = dict(prices or {})
+    buy_prices = prices
+    if market == "br":
+        # B3: não existe compra por valor (notional). Compra-se quantidade
+        # inteira, com ordem limitada; o dinheiro é dimensionado pelo preço
+        # limite (cotação + folga), para nunca gastar mais que o orçamento.
+        whole = True
+        buf = float(cfg.get("limit_buffer_pct", 0.5) or 0)
+        rows = [dict(r, ticker=b3.base(r["ticker"])) for r in rows]
+        prices = {b3.base(t): p for t, p in prices.items()}
+        buy_prices = {t: b3.tick(p * (1 + buf / 100.0)) for t, p in prices.items()}
 
     keep, dropped = normalise(rows, cfg.get("blocked"), top)
     if not keep:
@@ -283,9 +332,11 @@ def size(rows, cfg, budget=None, prices=None, whole=None, cents=False, top=None)
     if whole:
         missing = [r["ticker"] for r in keep if not prices.get(r["ticker"])]
         if missing:
-            raise SizeError("whole shares need a price for: %s (add them to trader/prices.json, "
+            raise SizeError("%s need a price for: %s (add them to trader/prices.json, "
                             "e.g. with trader-alerts: alerts.py quote %s --write)"
-                            % (", ".join(missing), " ".join(missing)))
+                            % ("B3 orders" if market == "br" else "whole shares",
+                               ", ".join(missing), " ".join(missing)))
+    prices = buy_prices
 
     while True:
         live = [dict(r) for r in keep]
@@ -304,11 +355,11 @@ def size(rows, cfg, budget=None, prices=None, whole=None, cents=False, top=None)
             break
         worst = min(small, key=lambda r: (r["source_weight"], r["ticker"]))
         if whole and shares is not None and shares[worst["ticker"]] == 0 and prices.get(worst["ticker"], 0) > 0:
-            reason = ("one share costs $%s, more than its slice; it cannot be bought in whole shares"
-                      % _num(prices[worst["ticker"]]))
+            reason = ("one share costs %s, more than its slice; it cannot be bought in whole shares"
+                      % b3.money(prices[worst["ticker"]], market))
         else:
-            reason = "its slice ($%s) is under your $%s minimum order" % (
-                _num(dollars[worst["ticker"]]), _num(min_order))
+            reason = "its slice (%s) is under your %s minimum order" % (
+                b3.money(dollars[worst["ticker"]], market), b3.money(min_order, market))
         dropped.append({"ticker": worst["ticker"], "reason": reason})
         keep = [r for r in keep if r["ticker"] != worst["ticker"]]
         if not keep:
@@ -323,9 +374,15 @@ def size(rows, cfg, budget=None, prices=None, whole=None, cents=False, top=None)
         if prices.get(t):
             p["price"] = prices[t]
             p["shares"] = shares[t] if whole else round(dollars[t] / prices[t], 4)
+        if market == "br":
+            kind, guess = b3.asset_type(t, cfg.get("asset_types"))
+            lot = b3.round_lot(t, cfg.get("asset_types"), cfg.get("round_lots"))
+            p.update({"asset_type": kind, "asset_type_guess": guess, "lot": lot,
+                      "limit_price": prices.get(t)})
         positions.append(p)
     invested = round(sum(p["dollars"] for p in positions), 2)
     return {
+        "market": market, "currency": "BRL" if market == "br" else "USD",
         "budget": budget, "cash_buffer_pct": buf_pct, "cash_buffer": cash_buffer,
         "investable": investable, "max_position_pct": cap_pct, "cap": cap,
         "min_order_usd": min_order, "whole_shares": bool(whole),
@@ -345,7 +402,12 @@ def _num(x):
 
 
 def orders_from(result, source=""):
-    """Proposed buy orders, one per position, in Alpaca place_stock_order shape."""
+    """Proposed buy orders, one per position, in Alpaca place_stock_order shape.
+
+    B3: uma ordem limitada no lote padrão e, se sobrar, outra no fracionário
+    (ticker + F), as duas com o mesmo preço limite, validade do dia."""
+    if result.get("market") == "br":
+        return _orders_b3(result, source)
     out = []
     for p in result["positions"]:
         if p["dollars"] <= 0:
@@ -365,6 +427,38 @@ def orders_from(result, source=""):
     return out
 
 
+def _orders_b3(result, source=""):
+    out = []
+    for p in result["positions"]:
+        qty = int(p.get("shares") or 0)
+        if qty <= 0:
+            continue
+        why = "%.2f%% da carteira" % p["weight"]
+        if source:
+            why += ", copiando %s" % source
+        if p["capped"]:
+            why += "; limitado a %s%% do orçamento de %s" % (
+                _num(result["max_position_pct"]), b3.money(result["budget"], "br"))
+        if p.get("asset_type_guess"):
+            why += "; tipo %s deduzido do ticker, confirme" % b3.TYPE_NAMES.get(p["asset_type"], p["asset_type"])
+        lote, frac = b3.split_lot(qty, p["lot"])
+        legs = []
+        if lote:
+            legs.append((p["ticker"], lote, "padrao"))
+        if frac:
+            legs.append((b3.fractional(p["ticker"]), frac, "fracionario"))
+        for sym, q, kind in legs:
+            out.append({
+                "symbol": sym, "side": "buy", "qty": str(q),
+                "type": "limit", "limit_price": "%.2f" % p["limit_price"],
+                "time_in_force": "day", "market": "br", "lot_market": kind,
+                "underlying": p["ticker"], "asset_type": p["asset_type"],
+                "why": why + (" (lote padrão de %d)" % p["lot"] if kind == "padrao" and p["lot"] > 1 else
+                              " (fracionário: %d de %d)" % (q, qty) if kind == "fracionario" else ""),
+            })
+    return out
+
+
 def write_orders(path, orders, result, cfg, source=""):
     d = os.path.dirname(path)
     if d:
@@ -373,28 +467,35 @@ def write_orders(path, orders, result, cfg, source=""):
         "created_by": "trader-budget",
         "created_at": datetime.datetime.now().replace(microsecond=0).isoformat(),
         "status": "proposed",
+        "market": result.get("market", "us"),
+        "currency": result.get("currency", "USD"),
         "paper": bool(cfg.get("paper", True)),
-        "note": ("Proposals only. Nothing is placed until trader-risk passes each order "
+        "note": ("Somente propostas. Nada é enviado até o trader-risk aprovar cada boleta "
+                 "e você dizer sim a ela no chat." if result.get("market") == "br" else
+                 "Proposals only. Nothing is placed until trader-risk passes each order "
                  "and you say yes to it in the chat."),
         "source": source,
         "orders": orders,
     }
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump(doc, fh, indent=2)
+        json.dump(doc, fh, indent=2, ensure_ascii=False)
         fh.write("\n")
 
 
 # ---------------------------------------------------------------- report
 
-def money(x):
-    x = float(x)
-    if abs(x - round(x)) < 0.005:
-        return "$" + "{:,.0f}".format(round(x))
-    return "$" + "{:,.2f}".format(x)
+_MARKET = ["us"]
+
+
+def money(x, market=None):
+    return b3.money(x, market or _MARKET[0])
 
 
 def report(result, orders, source=""):
     r = result
+    _MARKET[0] = r.get("market", "us")
+    if _MARKET[0] == "br":
+        return report_b3(result, orders, source)
     lines = []
     if source:
         lines.append("Copying: %s" % source)
@@ -435,6 +536,48 @@ def report(result, orders, source=""):
     return "\n".join(lines)
 
 
+def report_b3(result, orders, source=""):
+    r = result
+    m = lambda x: b3.money(x, "br")  # noqa: E731
+    lines = []
+    if source:
+        lines.append("Copiando: %s" % source)
+    lines.append("Orçamento %s, caixa de %s%% = %s, investindo %s, teto de %s%% = %s por ativo"
+                 % (m(r["budget"]), _num(r["cash_buffer_pct"]), m(r["cash_buffer"]),
+                    m(r["investable"]), _num(r["max_position_pct"]), m(r["cap"])))
+    lines.append("Preços limite = cotação + folga; quantidades inteiras, lote padrão + fracionário.")
+    lines.append("")
+    lines.append("%-7s %-5s %-20s %7s %12s %10s %6s %5s  nota" % (
+        "ticker", "tipo", "nome", "peso", "valor", "limite", "qtd", "lote"))
+    for p in r["positions"]:
+        row = "%-7s %-5s %-20s %6.2f%% %12s %10s %6s %5s" % (
+            p["ticker"], b3.TYPE_NAMES.get(p.get("asset_type"), "?")[:5], (p["name"] or "")[:20],
+            p["weight"], m(p["dollars"]), m(p.get("limit_price") or 0), p.get("shares", ""), p.get("lot", ""))
+        notes = []
+        if p["capped"]:
+            notes.append("no teto de %s%%" % _num(r["max_position_pct"]))
+        if p.get("asset_type_guess"):
+            notes.append("tipo deduzido, confirme")
+        lines.append(row + ("  " + "; ".join(notes) if notes else ""))
+    lines.append("%-34s %12s" % ("investido", m(r["invested"])))
+    lines.append("%-34s %12s" % ("caixa", m(r["cash_buffer"])))
+    lines.append("%-34s %12s" % ("sobra parada", m(r["idle"])))
+    if r["idle"] >= 1:
+        lines.append("Sobra de %s: as quantidades inteiras não fecham o valor exato." % m(r["idle"]))
+    for d in r["dropped"]:
+        lines.append("Fora: %s: %s" % (d["ticker"], d["reason"]))
+    lines.append("")
+    lines.append("Boletas propostas (nada foi enviado):")
+    for o in orders:
+        lines.append("  COMPRA %s %s, limitada a %s, validade dia (%s)" % (
+            o["qty"], o["symbol"], m(float(o["limit_price"])),
+            "lote padrão" if o["lot_market"] == "padrao" else "fracionário"))
+    lines.append("")
+    lines.append("Próximo: trader-risk confere cada boleta; trader-broker pede o seu sim para cada uma.")
+    lines.append("Educação e ferramenta, não recomendação de investimento.")
+    return "\n".join(lines)
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Size positions to your budget (trader-budget).")
     ap.add_argument("--targets", default="trader/targets.json", help="target weights (default trader/targets.json)")
@@ -448,6 +591,7 @@ def main(argv=None):
     ap.add_argument("--write", nargs="?", const="trader/orders.json", metavar="PATH",
                     help="write the proposed orders (default trader/orders.json)")
     ap.add_argument("--json", action="store_true", help="print JSON instead of the table")
+    ap.add_argument("--market", choices=["br", "us"], help="B3 (br) or US (us); default from config or tickers")
     a = ap.parse_args(argv)
     try:
         cfg = load_config(a.config)
@@ -463,7 +607,7 @@ def main(argv=None):
         if not prices and os.path.exists("trader/prices.json") and not a.prices:
             prices = load_prices("trader/prices.json")
         whole = True if a.whole_shares else None
-        result = size(rows, cfg, a.budget, prices, whole, a.cents, a.top)
+        result = size(rows, cfg, a.budget, prices, whole, a.cents, a.top, a.market)
         orders = orders_from(result, source)
         if a.write:
             write_orders(a.write, orders, result, cfg, source)
@@ -475,7 +619,10 @@ def main(argv=None):
     else:
         print(report(result, orders, source))
         if a.write:
-            print("Wrote %d proposed orders to %s" % (len(orders), a.write))
+            if result.get("market") == "br":
+                print("Gravei %d boletas propostas em %s" % (len(orders), a.write))
+            else:
+                print("Wrote %d proposed orders to %s" % (len(orders), a.write))
     return 0
 
 
