@@ -335,6 +335,22 @@ def fetch(url, timeout=20, headers=None):
         raise AlertError("could not reach %s: %s" % (url.split("/")[2], e.reason))
 
 
+TOKEN_FILE = os.path.join("~", ".config", "trader-skill", "brapi_token")
+
+
+def brapi_token():
+    """BRAPI_TOKEN do ambiente, senão a primeira linha de ~/.config/trader-skill/brapi_token."""
+    token = os.environ.get("BRAPI_TOKEN", "").strip()
+    if token:
+        return token
+    path = os.path.expanduser(TOKEN_FILE)
+    try:
+        with open(path, encoding="utf-8") as fh:
+            return fh.readline().strip()
+    except OSError:
+        return ""
+
+
 def _brapi_quote(sym, offline=None):
     if offline:
         path = os.path.join(offline, "brapi-%s.json" % b3.base(sym))
@@ -342,10 +358,11 @@ def _brapi_quote(sym, offline=None):
             raise AlertError("no offline quote file %s" % path)
         with open(path, encoding="utf-8") as fh:
             return parse_brapi(fh.read(), sym)
-    token = os.environ.get("BRAPI_TOKEN", "").strip()
+    token = brapi_token()
     if not token and b3.base(sym) not in BRAPI_FREE:
-        raise AlertError("brapi needs a key for %s: export BRAPI_TOKEN=... (free plan at brapi.dev); "
-                         "without one only %s answer" % (sym, ", ".join(sorted(BRAPI_FREE))))
+        raise AlertError("brapi precisa de chave para %s: export BRAPI_TOKEN=... ou ~/.config/trader-skill/"
+                         "brapi_token (plano grátis em brapi.dev); sem chave só %s respondem"
+                         % (sym, ", ".join(sorted(BRAPI_FREE))))
     headers = {"Authorization": "Bearer " + token} if token else {}
     return parse_brapi(fetch(brapi_url(sym), headers=headers), sym)
 
@@ -369,7 +386,7 @@ def get_quotes(symbols, source="yahoo", offline=None, pause=PAUSE):
                 if src == "brapi":
                     errors.append(str(e))
                     continue
-                errors.append(str(e) + "; trying Yahoo")
+                errors.append(str(e) + "; tentando o Yahoo")
             src = "yahoo"
         elif src in ("auto", "brapi"):
             src = "yahoo"  # brapi covers the B3; US tickers go to Yahoo
@@ -486,9 +503,17 @@ def evaluate(rules, quotes, status, state, now_utc):
                 word = "at or above" if typ == "above" else "at or below"
                 label = {"stop": "stop", "target": "target"}.get(r["type"], typ)
                 mk = b3.market_of(sym)
-                rings.append({"id": rid, "symbol": sym, "message": "%s %s %s is %s your %s %s%s."
-                              % (sym, "is" if status["open"] else "last", b3.money(p, mk, True), word, label,
-                                 b3.money(r["price"], mk), (" (" + r["note"] + ")") if r.get("note") else "")})
+                note = (" (" + r["note"] + ")") if r.get("note") else ""
+                if mk == "br":
+                    msg = "%s %s %s, %s do seu %s de %s%s." % (
+                        sym, "está em" if status["open"] else "fechou a", b3.money(p, mk, True),
+                        "igual ou acima" if typ == "above" else "igual ou abaixo",
+                        {"stop": "stop", "target": "alvo"}.get(r["type"], "nível"), b3.money(r["price"], mk), note)
+                else:
+                    msg = "%s %s %s is %s your %s %s%s." % (
+                        sym, "is" if status["open"] else "last", b3.money(p, mk, True), word, label,
+                        b3.money(r["price"], mk), note)
+                rings.append({"id": rid, "symbol": sym, "message": msg})
                 rung[rid] = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
             elif not hit and rid in rung and r.get("rearm"):
                 del rung[rid]
@@ -501,7 +526,8 @@ def evaluate(rules, quotes, status, state, now_utc):
             hit = abs(move) >= r["pct"] and (not want or (want == "up") == (move > 0))
             if hit and rung.get(rid, "")[:10] != today:
                 mk = b3.market_of(sym)
-                rings.append({"id": rid, "symbol": sym, "message": "%s moved %+.2f%% to %s (from %s)."
+                fmt = "%s variou %+.2f%% para %s (antes %s)." if mk == "br" else "%s moved %+.2f%% to %s (from %s)."
+                rings.append({"id": rid, "symbol": sym, "message": fmt
                               % (sym, move, b3.money(p, mk, True), b3.money(float(ref), mk, True))})
                 rung[rid] = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
     state["last_check"] = now_utc.strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -633,13 +659,17 @@ def cmd_check(a):
     else:
         print("%s %s (%s %s, %s)." % ("B3" if mk == "br" else "NYSE", "OPEN" if status["open"] else "closed",
                                        status["now_local"], status["tz"], status["reason"]))
+        br = mk == "br"
         for r in rings:
-            print("ALERT " + r["message"])
+            print(("ALERTA " if br else "ALERT ") + r["message"])
         if not rings:
-            print("Nothing hit. %d rule(s) watched." % len(rules))
+            print(("Nada tocou. %d regra(s) acompanhada(s)." if br else "Nothing hit. %d rule(s) watched.") % len(rules))
         for e in errors:
-            print("error: " + e)
-        if rings:
+            print(("erro: " if br else "error: ") + e)
+        if rings and br:
+            print("Um alerta é informação, não ordem. Para agir: dimensione (trader-budget ou trader-rebalance), "
+                  "confira (trader-risk) e diga sim (trader-broker).")
+        elif rings:
             print("An alert is information, not an order. To act on one, size it (trader-budget or "
                   "trader-rebalance), check it (trader-risk) and say yes to it (trader-broker).")
     return 0 if rings else 1

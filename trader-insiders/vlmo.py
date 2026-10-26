@@ -40,7 +40,7 @@ COL = {
     "ref": ("Data_Referencia", "DT_REFER"),
     "versao": ("Versao", "VERSAO"),
     "cargo": ("Tipo_Cargo", "Cargo", "Tipo_Empresa"),
-    "empresa": ("Empresa", "Tipo_Empresa"),
+    "empresa": ("Empresa",),
     "mov": ("Tipo_Movimentacao", "Movimentacao", "Descricao_Movimentacao"),
     "oper": ("Tipo_Operacao", "Operacao"),
     "ativo": ("Tipo_Ativo", "Valor_Mobiliario"),
@@ -65,26 +65,29 @@ def g(row, key, default=""):
     return default if v is None else v
 
 
+# Tipo_Movimentacao reais (VLMO 2026): só estes são negócios de compra e venda. Os demais
+# (exercício de opção de compra, plano de remuneração, bonificação, empréstimo, doação, herança,
+# posse, desligamento, subscrição) mudam a posição sem ser compra ou venda no mercado.
+BUY_MOVES = {"compra a vista", "compra", "compra a termo"}
+SELL_MOVES = {"venda a vista", "venda", "venda a termo"}
+SHARE_ASSETS = {"acoes", "units", "certificado de deposito de acoes"}
+
+
 def kind_of(row):
-    """'compra', 'venda' ou 'outro' a partir do tipo de movimentação e da operação."""
+    """'compra', 'venda', 'saldo' ou 'outro' a partir do tipo de movimentação."""
     mov = cvm.fold(g(row, "mov"))
-    op = cvm.fold(g(row, "oper"))
-    if "saldo" in mov:
+    if mov.startswith("saldo"):
         return "saldo"
-    if "compra" in mov or "aquisicao" in mov:
+    if mov in BUY_MOVES:
         return "compra"
-    if "venda" in mov or "alienacao" in mov:
+    if mov in SELL_MOVES:
         return "venda"
-    if op.startswith("credito") or op == "c":
-        return "outro+"
-    if op.startswith("debito") or op == "d":
-        return "outro-"
     return "outro"
 
 
 def is_share(row):
-    a = cvm.fold(g(row, "ativo"))
-    return (not a) or "acao" in a or "acoes" in a or "unit" in a or "certificado" in a
+    """Ações e units. Fora: opções, debêntures, bônus e recibos de subscrição, derivativos."""
+    return cvm.fold(g(row, "ativo")) in SHARE_ASSETS
 
 
 def load(year, offline=None):
@@ -100,7 +103,8 @@ def load(year, offline=None):
         out.append({
             "cnpj": cvm.digits(g(r, "cnpj")).zfill(14), "nome": g(r, "nome"),
             "ref": str(g(r, "ref"))[:10], "versao": str(g(r, "versao")), "cargo": g(r, "cargo"),
-            "empresa": g(r, "empresa"), "mov": g(r, "mov"), "tipo": k, "acao": is_share(r),
+            "empresa": g(r, "empresa"), "tipo_empresa": cvm.fold(cvm.pick(r, "Tipo_Empresa", default="") or ""),
+            "mov": g(r, "mov"), "tipo": k, "acao": is_share(r),
             "carac": g(r, "carac"), "data": str(g(r, "data"))[:10],
             "qtd": abs(cvm.num(g(r, "qtd"))), "preco": cvm.num(g(r, "preco")),
             "volume": abs(cvm.num(g(r, "volume"))),
@@ -133,11 +137,15 @@ def summarize(rows):
     """{(cnpj, ref): {"nome", "grupos": {cargo: {compra_qtd, compra_vol, venda_qtd, venda_vol, outros}}}}"""
     docs = {}
     for r in rows:
-        if not r["acao"] or r["tipo"] == "saldo":
+        # só as ações da própria companhia: o informe também traz as da controladora e das controladas
+        if not r["acao"] or r["tipo"] == "saldo" or r["tipo_empresa"] not in ("", "companhia"):
             continue
         d = docs.setdefault((r["cnpj"], r["ref"]), {"cnpj": r["cnpj"], "nome": r["nome"], "ref": r["ref"],
                                                    "versao": r["versao"], "grupos": {}, "datas": set()})
-        grp = d["grupos"].setdefault(r["cargo"] or "?", {"compra_qtd": 0.0, "compra_vol": 0.0, "venda_qtd": 0.0,
+        cargo = (r["cargo"] or "?").replace(" ou Vinculado", "")
+        if r["carac"] and len(r["carac"]) <= 4:
+            cargo = "%s (%s)" % (cargo, r["carac"])
+        grp = d["grupos"].setdefault(cargo, {"compra_qtd": 0.0, "compra_vol": 0.0, "venda_qtd": 0.0,
                                                          "venda_vol": 0.0, "outros": 0})
         if r["tipo"] == "compra":
             grp["compra_qtd"] += r["qtd"]
@@ -154,6 +162,8 @@ def summarize(rows):
         d["compra_vol"] = sum(x["compra_vol"] for x in d["grupos"].values())
         d["venda_vol"] = sum(x["venda_vol"] for x in d["grupos"].values())
         d["liquido"] = d["compra_vol"] - d["venda_vol"]
+        d["compra_qtd"] = sum(x["compra_qtd"] for x in d["grupos"].values())
+        d["venda_qtd"] = sum(x["venda_qtd"] for x in d["grupos"].values())
     return docs
 
 
@@ -215,9 +225,14 @@ def render(d, tick_names=None):
     for cargo, x in sorted(d["grupos"].items(), key=lambda kv: -(kv[1]["compra_vol"] + kv[1]["venda_vol"])):
         parts = []
         if x["compra_qtd"]:
-            parts.append("comprou %s ações (%s)" % (_q(x["compra_qtd"]), R(x["compra_vol"])))
+            parts.append("comprou %s ações%s" % (_q(x["compra_qtd"]),
+                         (" (%s)" % R(x["compra_vol"])) if x["compra_vol"] else " (valor não informado)"))
         if x["venda_qtd"]:
-            parts.append("vendeu %s ações (%s)" % (_q(x["venda_qtd"]), R(x["venda_vol"])))
+            parts.append("vendeu %s ações%s" % (_q(x["venda_qtd"]),
+                         (" (%s)" % R(x["venda_vol"])) if x["venda_vol"] else " (valor não informado)"))
+        if x["compra_qtd"] and abs(x["compra_qtd"] - x["venda_qtd"]) < 1:
+            parts.append("mesma quantidade comprada e vendida: costuma ser transferência entre veículos do grupo, "
+                         "não mudança de posição")
         if x["outros"] and not parts:
             parts.append("%d movimentações que não são compra ou venda (bonificação, plano de ações...)" % x["outros"])
         if parts:
@@ -251,7 +266,7 @@ def cmd_novos(a):
         if first_run and d["ref"] < cutoff and not a.tudo:
             seen[key] = d["versao"]
             continue
-        if not (d["compra_vol"] or d["venda_vol"]) and not a.tudo:
+        if not (d["compra_qtd"] or d["venda_qtd"]) and not a.tudo:
             seen[key] = d["versao"]
             continue
         new.append(d)
@@ -307,6 +322,7 @@ def cmd_ranking(a):
     for d in reversed(rows[-a.n:]):
         if d["liquido"] > 0:
             print("    %-45s %s" % (d["nome"][:45], R(d["liquido"])))
+    print("Só informes com valor em reais entram no ranking (muitos informam só a quantidade).")
     print("Venda de insider tem muitos motivos (impostos, diversificação, plano de ações): não é sinal por si só.")
     return 0
 

@@ -57,12 +57,28 @@ IMPORTANT = {
     "fato relevante": "FATO RELEVANTE",
     "comunicado ao mercado": "comunicado",
     "aviso aos acionistas": "aviso aos acionistas",
+    "relatorio proventos": "proventos",
     "dados economico-financeiros": "resultados",
     "assembleia": "assembleia",
     "calendario de eventos corporativos": "calendário",
     "reuniao da administracao": "reunião da administração",
     "valores mobiliarios negociados e detidos": "insiders",
+    "opa - edital de oferta publica de acoes": "OPA",
+    "informacoes de companhias em recuperacao judicial ou extrajudicial": "recuperação judicial",
+    "informacoes companhias em falencia": "falência",
+    "comunicacao sobre transacao entre partes relacionadas": "partes relacionadas",
+    "acordo de acionistas": "acordo de acionistas",
 }
+# categorias reais do IPE 2026 têm sufixos, como "Valores Mobiliários negociados e detidos (art. 11
+# da Instr. CVM nº 358)": a busca é pelo começo do nome
+
+
+def label_of(category):
+    f = cvm.fold(category)
+    for k, v in IMPORTANT.items():
+        if f.startswith(k):
+            return v
+    return None
 TAGS = [
     ("resultado", r"resultado|lucro|receita|ebitda|balan[cç]o|trimestr|\b\dT\d{2}\b|guidance|proje[cç]"),
     ("proventos", r"dividend|juros sobre (o )?capital|\bjcp\b|provento|bonifica|desdobr|grupamento|recompra"),
@@ -104,7 +120,7 @@ def ipe_docs(year, offline=None):
     for r in cvm.rows(z, contains="ipe_cia_aberta"):
         g = lambda k: cvm.pick(r, *COL[k], default="") or ""  # noqa: E731
         cat = g("categoria")
-        label = IMPORTANT.get(cvm.fold(cat))
+        label = label_of(cat)
         if not label:
             continue
         out.append({"source": "CVM", "cnpj": cvm.digits(g("cnpj")).zfill(14), "company": g("nome"),
@@ -230,7 +246,8 @@ def remember(items, state, today):
 def render(items, errors, weights=None):
     lines = []
     for it in items:
-        mark = "!" if it.get("label") in ("FATO RELEVANTE", "resultados", "aviso aos acionistas") else " "
+        mark = "!" if it.get("label") in ("FATO RELEVANTE", "resultados", "aviso aos acionistas", "proventos", "OPA",
+                                          "recuperação judicial", "falência") else " "
         tk = "/".join(it.get("tickers", []))
         w = ""
         if weights:

@@ -58,9 +58,11 @@ Sem `--market`, vale o `"market"` de `trader/config.json` (padrão `us`).
 ## Cotações
 
 - **B3, brapi.dev** (padrão): `https://brapi.dev/api/v2/stocks/quote?symbols=PETR4`,
-  uma requisição por ticker. A chave vai na variável de ambiente
-  `BRAPI_TOKEN` e é enviada no cabeçalho `Authorization: Bearer`, nunca na URL
-  nem no chat. Sem chave, só os tickers de teste respondem (PETR4, VALE3,
+  uma requisição por ticker. A chave vem da variável de ambiente `BRAPI_TOKEN`
+  ou, se ela não existir, da primeira linha de `~/.config/trader-skill/brapi_token`
+  (crie com `chmod 600`). É enviada no cabeçalho `Authorization: Bearer`, nunca
+  na URL. Nunca peça a chave no chat; se o usuário colar uma, diga para gerar
+  outra no painel da brapi. Sem chave, só os tickers de teste respondem (PETR4, VALE3,
   ITUB4, MGLU3, MXRF11, HGLG11). O plano gratuito tem cerca de 15 mil
   requisições por mês, uma por vez, cotação com uns 30 minutos de atraso; os
   planos pagos liberam proventos, fundamentos e histórico longo. Ticker

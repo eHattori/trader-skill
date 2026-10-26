@@ -55,9 +55,18 @@ python3 "${CLAUDE_SKILL_DIR}/vlmo.py" colunas                         # cabeçal
   informe vale mais.
 - **Grupo, não pessoa.** O informe é agregado por cargo. Nunca diga "o CEO
   vendeu": diga "a diretoria vendeu".
-- **Compra e venda à vista contam.** Bonificação, exercício de opções do plano
-  de remuneração, doação, herança e transferência entre veículos do mesmo grupo
-  aparecem como "outras movimentações" e não são compra nem venda.
+- **Só compra e venda contam** (à vista, a termo ou sem qualificação).
+  Exercício de opção de compra, ações de plano de remuneração, bonificação,
+  empréstimo, doação, herança, posse e desligamento aparecem como "outras
+  movimentações". Só ações e units entram; opções, debêntures e bônus de
+  subscrição ficam fora.
+- **Só as ações da própria companhia.** O informe também traz negociações com
+  ações da controladora e das controladas; a ferramenta deixa essas fora.
+- **Valor nem sempre vem.** Muitos informes trazem a quantidade sem preço:
+  aparece "valor não informado". O ranking usa só os que têm valor.
+- **Compra e venda iguais no mês**, no mesmo grupo, costumam ser transferência
+  entre veículos (holding, fundo, pessoa física), não mudança de posição. A
+  ferramenta avisa.
 - **ON e PN.** O informe separa por espécie (ON, PN, units); diga qual.
 - **FIIs, ETFs e BDRs** não entregam este informe. A ferramenta avisa.
 - **Venda de insider tem muitos motivos** (imposto, diversificação, plano de
@@ -75,17 +84,17 @@ python3 "${CLAUDE_SKILL_DIR}/vlmo.py" colunas                         # cabeçal
 4. Para rodar sozinho: uma tarefa agendada semanal (a CVM atualiza o arquivo
    toda semana), por exemplo às segundas de manhã.
 
-## Exemplo (dados fictícios dos testes)
+## Exemplo (VLMO real, setembro de 2026, lido em 26/10/2026)
 
 ```
-NOVO COMPANHIA EXEMPLO S.A. (EXMP4), mês 2026-09 (versão 1), CNPJ 11.222.333/0001-44
-  - Diretoria: comprou 20.000 ações (R$ 750.000)
-  - Conselho de Administração: vendeu 5.000 ações (R$ 200.500)
-  negócios entre 2026-09-15 e 2026-09-22
+NOVO WEG SA (WEGE3), mês 2026-09 (versão 1), CNPJ 84.429.695/0001-11
+  - Controlador (ON): comprou 2.540 ações (R$ 128.499); vendeu 3.169.600 ações (R$ 163.457.288)
+  - Diretor (ON): comprou 5.000 ações (R$ 249.750)
+  negócios entre 2026-09-02 e 2026-09-29
 ```
 
 E então: "É um informe público entregue até 10 dias depois do mês. Diz o que
-o grupo negociou em setembro, não o que alguém vai fazer."
+o grupo controlador negociou em setembro, não o que alguém vai fazer, nem por quê."
 
 Se o usuário quiser agir, o caminho é o longo: `/trader-budget`, `/trader-risk`
 e o sim dele no `/trader-broker`, boleta por boleta.

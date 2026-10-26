@@ -55,16 +55,23 @@ com algumas centenas de MB, baixado uma vez e guardado em `trader/cache/cvm/`.
 
 - **Diga a data, sempre.** "Carteira de 30/09/2026, publicada pela CVM em outubro."
   A CDA é a foto do último dia do mês, não a carteira de hoje.
-- **Sigilo.** O fundo pode esconder posições por até 90 dias (mais, com
-  autorização da CVM). Elas aparecem só como um total no arquivo CONFID; a
-  ferramenta mostra quanto é. Uma posição que "sumiu" pode ter entrado em
-  sigilo, e não sido vendida.
+- **Sigilo.** Fundos podem esconder posições por meses. Na CDA real de
+  julho de 2026, a SPX Falcon tinha toda a carteira de ações em sigilo até
+  27/01/2027, e o mês mais recente revelado da Dynamo Cougar era março. As
+  posições escondidas aparecem só como um total no arquivo CONFID, com a data
+  de liberação; a ferramenta mostra os dois. **Sem `--mes`, ela volta mês a
+  mês até a carteira mais recente já revelada** e lista os meses que pulou.
+  Diga ao usuário de que mês é a carteira: com grandes gestores, costuma ter
+  4 a 7 meses. Uma posição que "sumiu" pode ter entrado em sigilo, e não sido vendida.
 - **FIC e master.** Quase todo fundo de varejo é um FIC que investe num
   master. Com o padrão (`--seguir-master` implícito) a ferramenta segue até o
   master e avisa. `--sem-master` desliga.
-- **Só a ponta comprada à vista.** Opções, futuros, termo, swap e ações
-  tomadas em aluguel ficam fora; ações cedidas em aluguel continuam do fundo
-  e entram. A ferramenta mostra quanto ficou fora.
+- **Só a ponta comprada à vista.** Entram ações, ações cedidas em aluguel
+  (continuam do fundo), units (certificados de depósito) e BDRs. Ficam fora
+  debêntures (que têm códigos parecidos com ticker, como CSAN33), opções,
+  futuros, termo e ações tomadas em aluguel. A ferramenta mostra quanto ficou
+  fora. ETFs e FIIs que o fundo tenha aparecem como cotas de fundo, sem
+  ticker, e também ficam fora.
 - **O fundo, não a pessoa.** Diga "o fundo tinha", nunca "o gestor comprou".
 
 ## EUA: 13F na SEC
@@ -108,13 +115,13 @@ pesos em % com 2 casas somando 100. Guarde as 2 casas: o dimensionamento usa.
 
 ## Exemplo
 
-Com os dados fictícios dos testes (`tests/fixtures/trader-copycat-br`):
-"copiar o top 3 de um fundo de ações". A `busca` acha o FIC e o master; a
-`carteira` do FIC mostra que 98% do patrimônio está em cotas do master e
-segue para ele: PETR4 51%, VALE3 32%, TAEE11 12%, EGIE3 5% dos ativos da B3,
-mais R$ 120 mil em sigilo. `copiar --top 3` grava PETR4 53,93%, VALE3 33,71%,
-TAEE11 12,36%, e a resposta termina com: "Carteira de 30/09/2026. A seguir, o
-/trader-budget dimensiona para o seu orçamento."
+Com a CDA real (lida em 26/10/2026): `busca "dynamo cougar"` acha o FIC
+(73.232.530/0001-39) e o master (37.916.879/0001-26). `carteira` do FIC pula
+abril a julho, em sigilo, e mostra a carteira do master em 31/03/2026: PL
+R$ 11,26 bi, 97,4% em ações da B3, ENEV3 21,6%, VBBR3 11,2%, ITSA4 9,8%,
+RDOR3 9,7%, RENT3 8,5%, WEGE3 6,1%... A resposta diz: "Carteira de
+31/03/2026, a mais recente que o fundo já revelou; os meses seguintes estão
+em sigilo." Depois, `copiar --top 5` e o /trader-budget.
 
 ## O que ele nunca faz
 

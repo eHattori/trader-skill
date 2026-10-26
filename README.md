@@ -51,7 +51,15 @@ cp -r trader-skill/trader-* ~/.claude/skills/
 As ferramentas pedem Python 3.8 ou mais novo. Para a SEC (parte dos EUA),
 ponha seu nome e e-mail em `trader/config.json` (`"sec_user_agent": "Seu Nome
 voce@exemplo.com"`) ou em `SEC_USER_AGENT`. Para cotações da B3 além dos
-ativos de teste, crie uma chave grátis em brapi.dev e exporte `BRAPI_TOKEN`.
+ativos de teste (PETR4, VALE3, ITUB4, MGLU3), crie uma chave grátis em
+brapi.dev e exporte `BRAPI_TOKEN` (no `~/.zshrc`, por exemplo) ou grave-a na
+primeira linha de `~/.config/trader-skill/brapi_token`. Nunca cole a chave no chat.
+
+No claude.ai, as ferramentas precisam de acesso à rede para estes domínios
+(Configurações > Recursos, ou o painel do administrador da organização):
+`dados.cvm.gov.br`, `brapi.dev`, `query1.finance.yahoo.com`, `news.google.com`,
+e para a parte americana `www.sec.gov`, `data.sec.gov`, `efts.sec.gov`,
+`disclosures-clerk.house.gov`, `feeds.finance.yahoo.com`.
 
 ## Um mercado por pasta
 
@@ -128,8 +136,11 @@ python3 tests/sync_b3.py     # depois de editar b3.py ou cvm.py, copia para toda
 ```
 
 Os testes rodam offline, com fixtures: recortes reais da SEC e da Câmara
-para a parte americana e arquivos fictícios no formato da CVM para a parte
-brasileira (empresas e fundos inventados).
+para a parte americana e, para a brasileira, arquivos gerados por
+`tests/make_fixtures_br.py` com os cabeçalhos e valores de domínio reais da
+CVM (conferidos em 26/10/2026) e empresas e fundos inventados. As ferramentas
+brasileiras foram validadas contra os arquivos reais da CVM e a API da brapi
+na mesma data.
 
 ## Letras miúdas
 
@@ -147,7 +158,8 @@ allow"). Sem opções, margem, venda a descoberto ou alavancagem, a menos que
 você ligue.
 
 **Os dados têm atraso.** A CDA é a carteira do fim do mês, publicada semanas
-depois, com até 90 dias de sigilo para algumas posições. O informe de insiders
+depois; grandes fundos de ações costumam manter a carteira em sigilo por 4 a
+7 meses (a ferramenta mostra a mais recente já revelada e a data de liberação). O informe de insiders
 sai até 10 dias depois do mês. O 13F sai até 45 dias depois do trimestre. As
 divulgações do Congresso americano, até 45 dias depois do negócio. Cotação
 grátis tem uns 30 minutos de atraso. Nada disso é informação privilegiada.

@@ -15,8 +15,10 @@ fim do mês e transforma isso em pesos para copiar.
 
 O que a CDA NÃO mostra:
   - posições que o fundo pediu para manter em sigilo: a CVM permite adiar a
-    divulgação por até 90 dias (e mais, com autorização). Elas aparecem
-    agregadas no arquivo CONFID, sem o ativo; a ferramenta avisa o tamanho
+    divulgação por meses (na CDA de 07/2026, grandes fundos de ações estavam
+    em sigilo até 01/2027). Elas aparecem agregadas no arquivo CONFID, sem o
+    ativo, com a data de liberação; a ferramenta avisa o valor e a data. Sem
+    --mes, ela volta mês a mês até achar a carteira mais recente já revelada
   - o que foi comprado e vendido dentro do mês, ou o preço pago
   - fundos que investem via fundo master: o FIC tem cotas do master. Com
     --seguir-master (o padrão) a ferramenta segue para a carteira do master
@@ -47,14 +49,19 @@ COL_QTY = ("QT_POS_FINAL",)
 COL_VALUE = ("VL_MERC_POS_FINAL",)
 COL_PL = ("VL_PATRIM_LIQ",)
 COL_COTA_CNPJ = ("CNPJ_FUNDO_CLASSE_COTA", "CNPJ_FUNDO_COTA")
-COL_COTA_NAME = ("NM_FUNDO_CLASSE_COTA", "NM_FUNDO_COTA")
+COL_COTA_NAME = ("NM_FUNDO_CLASSE_SUBCLASSE_COTA", "NM_FUNDO_CLASSE_COTA", "NM_FUNDO_COTA")
 
-# aplicações que não são posição comprada em ações à vista
-EXCLUDE_APLIC = ("obrigac", "opcao", "opcoes", "futuro", "termo", "swap")
+# aplicações que contam como posição comprada à vista (TP_APLIC, sem acento e em minúsculas).
+# Lidas na CDA real de 07/2026. Fica fora: debêntures (que têm códigos como CSAN33, parecidos
+# com BDR), opções, futuros, termo, aluguel tomado ("obrigações por ações ... recebidos em
+# empréstimo"), bônus e recibos de subscrição.
+EQUITY_APLIC = ("acoes", "acoes e outros tvm cedidos em emprestimo",
+                "certificado ou recibo de deposito de valores mobiliarios",
+                "brazilian depository receipt - bdr")
 
 CAVEATS = [
     "A CDA é a carteira do último dia do mês, entregue à CVM semanas depois: não é a carteira de hoje.",
-    "Posições em sigilo (até 90 dias, ou mais com autorização da CVM) não aparecem ativo por ativo.",
+    "Posições em sigilo (muitas vezes por 3 a 6 meses) não aparecem ativo por ativo; a CVM publica a data de liberação.",
     "Só a ponta comprada à vista: sem opções, futuros, termo, aluguel tomado, caixa ou crédito.",
     "Copiar a carteira de um fundo não copia o resultado dele: você compra depois, ao preço de hoje.",
 ]
@@ -142,8 +149,10 @@ def holdings(month, cnpj, offline=None, follow_master=True, _depth=0):
                 aplic = cvm.fold(cvm.pick(r, *COL_APLIC) or "")
                 value = cvm.num(cvm.pick(r, *COL_VALUE))
                 tk = _ticker_from(r)
-                if any(x in aplic for x in EXCLUDE_APLIC) or not tk:
-                    if value:
+                if aplic not in EQUITY_APLIC or not tk:
+                    # "fora da cópia" lista só ativos com código (debêntures, opções, termo, aluguel);
+                    # caixa, valores a pagar e a receber não entram nessa conta
+                    if value and (cvm.pick(r, *COL_CODE) or tk):
                         skipped.append({"ativo": cvm.pick(r, *COL_CODE) or cvm.pick(r, *COL_DESC) or "?",
                                         "aplicacao": cvm.pick(r, *COL_APLIC) or "", "valor": value})
                     continue
@@ -171,13 +180,7 @@ def holdings(month, cnpj, offline=None, follow_master=True, _depth=0):
             inner = holdings(month, best[1], offline, follow_master, _depth + 1)
             inner["via"] = {"cnpj": cvm.fmt_cnpj(key), "nome": name, "pl": pl, "master": master}
             return inner
-    confid = 0.0
-    try:
-        for r in cvm.rows(z, contains="cda_fi_confid_%s" % month):
-            if _cnpj_key(cvm.pick(r, *COL_CNPJ)) == key:
-                confid += cvm.num(cvm.pick(r, *COL_VALUE))
-    except cvm.CVMError:
-        pass
+    confid, confid_until = confidential(z, month, key)
     rows = sorted(pos.values(), key=lambda p: -p["value"])
     total = sum(p["value"] for p in rows)
     for p in rows:
@@ -187,7 +190,23 @@ def holdings(month, cnpj, offline=None, follow_master=True, _depth=0):
         kind, guess = b3.asset_type(p["ticker"])
         p["tipo"], p["tipo_suposto"] = kind, guess
     return {"cnpj": cvm.fmt_cnpj(key), "nome": name, "data": dt, "mes": month, "pl": pl,
-            "total_b3": total, "confidencial": confid, "posicoes": rows, "fora": skipped, "master": master}
+            "total_b3": total, "confidencial": confid, "sigilo_ate": confid_until, "posicoes": rows,
+            "fora": skipped, "master": master}
+
+
+def confidential(z, month, key):
+    """(valor em ações/BDRs em sigilo, data de liberação mais distante) de um fundo num mês."""
+    total, until = 0.0, ""
+    try:
+        for r in cvm.rows(z, contains="cda_fi_confid_%s" % month):
+            if _cnpj_key(cvm.pick(r, *COL_CNPJ)) != key:
+                continue
+            if cvm.fold(cvm.pick(r, *COL_APLIC) or "") in EQUITY_APLIC:
+                total += cvm.num(cvm.pick(r, *COL_VALUE))
+                until = max(until, str(cvm.pick(r, "DT_CONFID_APLIC", default="") or ""))
+    except cvm.CVMError:
+        pass
+    return total, until
 
 
 def diff(new, old):
@@ -256,10 +275,14 @@ def show(h, top):
             R(p["value"]), p["pct_b3"], ("%.2f%%" % p["pct_pl"]) if p["pct_pl"] is not None else "?"))
     if h["confidencial"]:
         lines.append("")
-        lines.append("Em sigilo: %s em posições que o fundo ainda não revelou (até 90 dias)." % R(h["confidencial"]))
+        lines.append("Em sigilo: %s em ações e BDRs que o fundo ainda não revelou%s." % (
+            R(h["confidencial"]), (" (liberação prevista em %s)" % h["sigilo_ate"]) if h.get("sigilo_ate") else ""))
+    for sk in h.get("meses_em_sigilo", []):
+        lines.append("Mês %s pulado: carteira em sigilo%s." % (
+            sk["mes"], (" até %s" % sk["ate"]) if sk.get("ate") else ""))
     if h["fora"]:
         tot = sum(s["valor"] for s in h["fora"])
-        lines.append("Fora da cópia: %d linhas (%s) de opções, futuros, aluguel tomado ou ativos sem ticker." % (
+        lines.append("Fora da cópia: %d linhas (%s) de debêntures, opções, futuros, termo, aluguel tomado ou ativos sem ticker." % (
             len(h["fora"]), R(tot)))
     lines.append("")
     lines.extend(CAVEATS[:2])
@@ -294,13 +317,29 @@ def cmd_meses(a):
     return 0 if ok else 1
 
 
-def _hold(a, month=None):
-    month = month or a.mes or latest_month(a.offline)
-    h = holdings(month, a.cnpj, a.offline, not a.sem_master)
-    if not h["posicoes"]:
-        raise FundError("o fundo %s não tem ativos da B3 na CDA de %s (ou o CNPJ está errado; use busca)"
-                        % (cvm.fmt_cnpj(a.cnpj), month))
-    return h
+def _hold(a, month=None, back=9):
+    """Carteira do mês pedido; sem mês, a mais recente já revelada (volta até `back` meses)."""
+    fixed = month or a.mes
+    month = fixed or latest_month(a.offline)
+    skipped = []
+    for _ in range(1 if fixed else back):
+        try:
+            h = holdings(month, a.cnpj, a.offline, not a.sem_master)
+        except cvm.CVMError:
+            h = None
+        if h and h["posicoes"]:
+            h["meses_em_sigilo"] = skipped
+            return h
+        val, until = (0.0, "")
+        try:
+            val, until = confidential(cda_zip(month, a.offline), month, _cnpj_key(a.cnpj))
+        except cvm.CVMError:
+            pass
+        skipped.append({"mes": month, "ate": until, "valor": val})
+        month = _prev(month)
+    raise FundError("o fundo %s não tem ativos da B3 revelados na CDA %s (sigilo, CNPJ errado ou não é fundo "
+                    "de ações; use busca)" % (cvm.fmt_cnpj(a.cnpj),
+                                              ("de " + fixed) if fixed else "dos últimos %d meses" % back))
 
 
 def cmd_carteira(a):

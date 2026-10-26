@@ -318,8 +318,11 @@ class Copycat(InTmp):
         pos = {p["ticker"]: p for p in h["posicoes"]}
         self.assertEqual(sorted(pos), ["EGIE3", "PETR4", "TAEE11", "VALE3"])
         self.assertEqual(pos["PETR4"]["value"], 480000)  # inclui ações cedidas em aluguel
-        self.assertEqual(h["confidencial"], 120000)
-        self.assertEqual(len(h["fora"]), 2)  # opção lançada e aluguel tomado
+        self.assertEqual(h["confidencial"], 120000)  # só ações; cotas de fundos em sigilo não contam
+        self.assertEqual(h["sigilo_ate"], "2027-03-31")
+        fora = sorted(x["aplicacao"] for x in h["fora"])
+        self.assertIn("Debêntures", fora)  # CSAN33 parece BDR, mas é debênture
+        self.assertEqual(len(fora), 4)     # debênture, opção lançada, aluguel tomado, termo (caixa não conta)
 
     def test_copy_and_diff(self):
         code, out = run(fundos.main, ["--offline", self.F, "copiar", "22222222000122", "--mes", "202609", "--top", "3"])
@@ -334,6 +337,22 @@ class Copycat(InTmp):
         self.assertEqual([x[0] for x in d["zeradas"]], ["ITUB4"])
         self.assertIn("TAEE11", [x[0] for x in d["novas"]])
 
+    def test_skips_months_in_secrecy(self):
+        class A:
+            cnpj, mes, offline, sem_master = "22.222.222/0001-22", None, None, False
+        A.offline = self.F
+        old = fundos.latest_month
+        fundos.latest_month = lambda offline=None, tries=6: "202610"
+        try:
+            h = fundos._hold(A)
+        finally:
+            fundos.latest_month = old
+        self.assertEqual(h["mes"], "202609")  # 202610 está todo em sigilo
+        self.assertEqual(h["meses_em_sigilo"][0]["mes"], "202610")
+        A.mes = "202610"
+        with self.assertRaises(fundos.FundError):
+            fundos._hold(A)
+
     def test_search(self):
         res = fundos.search("202609", "exemplo fic", self.F)
         self.assertEqual(res[0]["cnpj"], "22.222.222/0001-22")
@@ -347,11 +366,15 @@ class Insiders(InTmp):
         code, out = run(vlmo.main, args)
         docs = {d["nome"]: d for d in json.loads(out)}
         ex = docs["COMPANHIA EXEMPLO S.A."]
-        self.assertEqual(ex["grupos"]["Diretoria"]["compra_qtd"], 20000)
-        self.assertEqual(ex["grupos"]["Conselho de Administração"]["venda_vol"], 200500)
+        # só compra à vista conta: exercício de opção e opções de plano de remuneração ficam fora
+        self.assertEqual(ex["grupos"]["Diretor (PN)"]["compra_qtd"], 20000)
+        self.assertEqual(ex["grupos"]["Diretor (PN)"]["outros"], 1)
+        self.assertEqual(ex["grupos"]["Conselho de Administração (ON)"]["venda_vol"], 200500)
+        self.assertEqual(ex["grupos"]["Conselho Fiscal (ON)"]["compra_qtd"], 100)  # sem preço, mas conta
+        self.assertNotIn("Controlador (ON)", ex["grupos"])  # venda de ações da controladora, não da companhia
         bank = docs["BANCO EXEMPLO S.A."]
         self.assertEqual(bank["versao"], "2")  # a reapresentação substitui a original
-        self.assertEqual(bank["venda_vol"], 10800000)
+        self.assertEqual(bank["venda_vol"], 10800000 + 600000)
         code, out = run(vlmo.main, args)
         self.assertEqual((code, json.loads(out)), (1, []))  # cada documento avisa uma vez
 
@@ -360,6 +383,12 @@ class Insiders(InTmp):
                                     "--dry-run"])
         self.assertIn("COMPANHIA EXEMPLO", out)
         self.assertNotIn("BANCO EXEMPLO", out)
+        self.assertIn("valor não informado", out)
+
+    def test_transfer_note(self):
+        code, out = run(vlmo.main, ["--offline", self.F, "novos", "--ano", "2026", "--tickers", "BEXE3",
+                                    "--dry-run"])
+        self.assertIn("transferência entre veículos", out)
 
 
 class News(InTmp):
@@ -367,18 +396,20 @@ class News(InTmp):
 
     def test_ipe_and_google(self):
         code, out = run(noticias.main, ["--offline", self.F, "--tickers", "EXMP4", "--hoje", "2026-10-26",
-                                        "--dias", "5", "--json"])
+                                        "--dias", "20", "--json"])
         items = json.loads(out)["itens"]
         labels = [i["label"] for i in items]
         self.assertIn("FATO RELEVANTE", labels)
         self.assertIn("aviso aos acionistas", labels)
         self.assertIn("manchete", labels)
+        self.assertIn("proventos", labels)   # categoria "Relatório Proventos"
+        self.assertIn("insiders", labels)    # nome real tem sufixo "(art. 11 da Instr. CVM nº 358)"
         self.assertNotIn("Estatuto consolidado", [i["title"] for i in items])  # categoria irrelevante
         self.assertTrue(all("BANCO" not in i.get("company", "") for i in items))
         jcp = [i for i in items if i["label"] == "aviso aos acionistas"][0]
         self.assertIn("proventos", jcp["tags"])
         code, out = run(noticias.main, ["--offline", self.F, "--tickers", "EXMP4", "--hoje", "2026-10-26",
-                                        "--dias", "5", "--json"])
+                                        "--dias", "20", "--json"])
         self.assertEqual(json.loads(out)["itens"], [])
 
 
