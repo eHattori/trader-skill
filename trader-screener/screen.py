@@ -187,6 +187,20 @@ def check(company, rule):
     return False, "%s %s, needs %s %s" % (m, _fmt(have), op, _fmt(want))
 
 
+# Métricas que não existem para certos tipos de empresa (marcados pelo trader-analyst).
+# Mesmo com "missing": "fail", a regra é ignorada para elas e o motivo aparece.
+HOLDING_NA = {"revenue_growth_yoy", "net_margin", "gross_margin", "operating_margin"}
+FINANCIAL_NA = {"gross_margin", "operating_margin"}
+
+
+def not_applicable(c, metric):
+    if c.get("holding") and metric in HOLDING_NA:
+        return "holding ou seguradora: o lucro vem de participações, não da receita"
+    if c.get("financial_company") and metric in FINANCIAL_NA:
+        return "banco ou seguradora: plano de contas sem esta linha"
+    return None
+
+
 def screen(companies, spec):
     """Every company with pass/fail and reasons; passing ones ranked."""
     rules = spec.get("rules", [])
@@ -196,7 +210,10 @@ def screen(companies, spec):
         fails, passes, gaps = [], [], []
         for r in rules:
             ok, why = check(c, r)
-            if ok is None:
+            na = not_applicable(c, r.get("metric"))
+            if ok is None and na:
+                gaps.append("%s não se aplica (%s)" % (r.get("metric"), na))
+            elif ok is None:
                 (fails if missing == "fail" else gaps).append(why)
             elif ok:
                 passes.append(why)

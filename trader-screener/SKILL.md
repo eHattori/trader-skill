@@ -56,9 +56,13 @@ python3 "${CLAUDE_SKILL_DIR}/screen.py" trader/metrics.json --rules trader/rules
 Operadores: `>`, `>=`, `<`, `<=`, `==`, `!=`, `between` ([mín, máx]), `in` e
 `not in` (uma lista, para tickers ou setores). `"missing": "fail"` reprova
 quem não tem a métrica que a regra pede; `"skip"` ignora a regra para ela e
-diz isso. Bancos não têm margem bruta: numa carteira da B3 com bancos, prefira
-`"skip"` ou não use essa métrica. O ranking dá de 0 a 1 por métrica e tira a
-média ponderada.
+diz isso. Métricas que não existem para o tipo de empresa são ignoradas mesmo
+com `"fail"`, e a saída diz "não se aplica": para holdings e seguradoras
+(Itaúsa, BB Seguridade), crescimento de receita e margens; para bancos, margem
+bruta e operacional. Uma holding que passa só pelo P/L passou num critério só:
+diga isso e sugira olhar o crescimento do lucro (`eps_growth_yoy`). O ranking dá
+de 0 a 1 por métrica, relativo às aprovadas (com duas aprovadas, a segunda fica
+com 0, o que não é nota ruim), e tira a média ponderada.
 
 ## Passos
 

@@ -442,6 +442,18 @@ class Screener(unittest.TestCase):
         self.assertEqual(screen.to_number("1,250"), 1250.0)   # sem R$ e com 3 casas: milhar americano
 
 
+class ScreenerHoldings(unittest.TestCase):
+    def test_holding_rules_not_applicable_even_with_fail(self):
+        spec = {"rules": [{"metric": "net_margin", "op": ">=", "value": 8}, {"metric": "pe", "op": "<=", "value": 12}],
+                "missing": "fail"}
+        cos = [{"ticker": "ITSA4", "holding": True, "pe": 8.3},
+               {"ticker": "XPTO3", "pe": 8.0}]
+        res = {r["ticker"]: r for r in screen.screen(cos, spec)}
+        self.assertTrue(res["ITSA4"]["passed"])
+        self.assertIn("não se aplica", res["ITSA4"]["skipped"][0])
+        self.assertFalse(res["XPTO3"]["passed"])  # sem a marca de holding, faltar continua reprovando
+
+
 class Rebalance(InTmp):
     def test_b3_orders(self):
         self.write("trader/targets.json", {"market": "br", "weights": [
