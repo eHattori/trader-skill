@@ -39,7 +39,17 @@ import cvm  # noqa: E402
 
 NET_NAMES = ("lucro/prejuizo consolidado do periodo", "lucro ou prejuizo liquido consolidado do periodo",
              "lucro/prejuizo do periodo", "lucro liquido do periodo", "lucro ou prejuizo liquido do periodo")
-FIN_HINTS = ("intermediacao financeira", "seguros", "previdencia")
+FIN_HINTS = ("intermediacao financeira", "seguros", "previdencia", "segurador")
+EBIT_NAMES = ("resultado antes do resultado financeiro e dos tributos",)
+BRUTO_NAMES = ("resultado bruto",)
+
+
+def _by_name(p, names):
+    """Valor da conta de 1º nível (3.xx) cujo nome está em `names` (o código muda entre planos de contas)."""
+    for code, d in sorted(p["_desc"].items()):
+        if code.count(".") == 1 and cvm.fold(d) in names:
+            return p[code]
+    return None
 
 
 class AnalystError(Exception):
@@ -120,8 +130,9 @@ def pick_lines(p):
             eps = vals
             break
     fin = any(h in cvm.fold(desc.get("3.01", "")) for h in FIN_HINTS)
-    return {"receita": p.get("3.01"), "lucro_bruto": None if fin else p.get("3.03"), "ebit": p.get("3.05"),
-            "lucro": net, "lpa": eps, "financeira": fin}
+    receita = p.get("3.01") or None  # zero = a companhia não preenche (holdings e seguradoras)
+    return {"receita": receita, "lucro_bruto": None if fin else (_by_name(p, BRUTO_NAMES) or None),
+            "ebit": _by_name(p, EBIT_NAMES), "lucro": net, "lpa": eps, "financeira": fin}
 
 
 def quarterly(itr_rows, dfp_rows):
@@ -161,11 +172,57 @@ def _main_eps(lpa):
     return lpa[0][1]
 
 
+def shares_out(kind, year, cnpj, offline=None):
+    """{DT_REFER: ações em circulação (total - tesouraria)} do arquivo composicao_capital."""
+    try:
+        z = _zip(kind, year, offline)
+    except cvm.CVMError:
+        return {}
+    out, ver = {}, {}
+    try:
+        for r in cvm.rows(z, contains="composicao_capital"):
+            if cvm.digits(cvm.pick(r, "CNPJ_CIA")).zfill(14) != cnpj:
+                continue
+            ref = cvm.pick(r, "DT_REFER")
+            v = int(float(cvm.pick(r, "VERSAO") or 0))
+            if v < ver.get(ref, -1):
+                continue
+            ver[ref] = v
+            n = cvm.num(cvm.pick(r, "QT_ACAO_TOTAL_CAP_INTEGR")) - cvm.num(cvm.pick(r, "QT_ACAO_TOTAL_TESOURO"))
+            if n > 0:
+                out[ref] = n
+    except cvm.CVMError:
+        return {}
+    return out
+
+
+def fill_eps(series, shares):
+    """Quando a companhia não preenche o lucro por ação (vem zero), calcula lucro / ações em circulação.
+
+    Fica marcado lpa_calculado: é o LPA total (todas as classes juntas), aproximado."""
+    for s in series:
+        if s.get("lpa") or s.get("lucro") is None:
+            continue
+        n = shares.get(s["fim"])
+        if not n:
+            near = [k for k in shares if k <= s["fim"]]
+            n = shares[max(near)] if near else None
+        if n:
+            s["lpa"] = [("calc", s["lucro"] / n)]
+            s["lpa_calculado"] = True
+    return series
+
+
 def analyse(series):
     """Acrescenta margens, crescimento contra o mesmo trimestre do ano anterior e últimos 12 meses."""
     by = {s["fim"]: s for s in series}
     for s in series:
         r = s["receita"]
+        # holding (Itaúsa, BB Seguridade...): o lucro vem da equivalência patrimonial e passa da
+        # receita; margem sobre a receita não faz sentido
+        s["holding"] = bool(r and s["lucro"] is not None and s["lucro"] > r) or (not r and s["lucro"])
+        if s["holding"]:
+            r = None
         s["margem_bruta"] = 100 * s["lucro_bruto"] / r if r and s["lucro_bruto"] is not None else None
         s["margem_ebit"] = 100 * s["ebit"] / r if r and s["ebit"] is not None else None
         s["margem_liquida"] = 100 * s["lucro"] / r if r and s["lucro"] is not None else None
@@ -200,6 +257,12 @@ def company(ticker, year=None, offline=None, tmap=None):
     series = quarterly(itr, dfp)
     if not series:
         raise AnalystError("sem ITR/DFP de %s (CNPJ %s) nos arquivos da CVM" % (t, cvm.fmt_cnpj(cnpj)))
+    if any(not s.get("lpa") for s in series):
+        shares = {}
+        for y in (year, year - 1, year - 2):
+            shares.update(shares_out("ITR", y, cnpj, offline))
+            shares.update(shares_out("DFP", y, cnpj, offline))
+        series = fill_eps(series, shares)
     series, ttm = analyse(series)
     return {"ticker": t, "cnpj": cvm.fmt_cnpj(cnpj), "nome": series[-1]["nome"], "series": series, "ttm": ttm}
 
@@ -210,10 +273,11 @@ def to_metrics(c):
     return {"ticker": c["ticker"], "name": c["nome"], "cnpj": c["cnpj"], "market": "br", "currency": "BRL",
             "period_end": last["fim"], "revenue_ttm": ttm.get("receita"), "net_income_ttm": ttm.get("lucro"),
             "eps_ttm": round(ttm["lpa_principal"], 4) if ttm.get("lpa_principal") is not None else None,
-            "revenue_growth_yoy": _r(last["cresc_receita"]), "eps_growth_yoy": _r(last["cresc_lpa"]),
+            "revenue_growth_yoy": None if last.get("holding") else _r(last["cresc_receita"]), "eps_growth_yoy": _r(last["cresc_lpa"]),
             "net_income_growth_yoy": _r(last["cresc_lucro"]), "gross_margin": _r(last["margem_bruta"]),
             "operating_margin": _r(last["margem_ebit"]), "net_margin": _r(last["margem_liquida"]),
-            "financial_company": last["financeira"], "source": "CVM ITR/DFP (DRE consolidada)"}
+            "financial_company": last["financeira"], "holding": bool(last.get("holding")),
+            "eps_calculated": any(s.get("lpa_calculado") for s in c["series"][-4:]), "source": "CVM ITR/DFP (DRE consolidada)"}
 
 
 def _r(x):
@@ -253,7 +317,12 @@ def render(c, n):
     last = c["series"][-1]
     if last["financeira"]:
         notes.append("instituição financeira: sem margem bruta; receita é da intermediação financeira")
-    if last["um_off"]:
+    if last.get("holding"):
+        notes.append("holding ou seguradora: o lucro vem de participações (equivalência patrimonial) e não da "
+                     "receita; margens e crescimento de receita não se aplicam")
+    if any(s.get("lpa_calculado") for s in c["series"]):
+        notes.append("LPA calculado (lucro / ações em circulação): a companhia não preencheu o lucro por ação")
+    if last["um_off"] and not last.get("holding"):
         notes.append("lucro acima do EBIT no último trimestre: há resultado financeiro ou não recorrente relevante")
     if c["ttm"]:
         notes.append("últimos 12 meses: receita %s, lucro %s, LPA %s" % (
